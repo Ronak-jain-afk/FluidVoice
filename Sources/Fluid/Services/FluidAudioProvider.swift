@@ -30,6 +30,7 @@ final class FluidAudioProvider: TranscriptionProvider {
     private var latestStreamingPreviewText: String = ""
     private var latestStreamingPreviewSampleCount: Int = 0
     private var latestStreamingPreviewFinishedAt: TimeInterval?
+    private let fastPreviewTailSilenceRMS: Float = 0.002
     private(set) var isReady: Bool = false
     private(set) var isWordBoostingActive: Bool = false
     private(set) var boostedVocabularyTermsCount: Int = 0
@@ -250,6 +251,7 @@ final class FluidAudioProvider: TranscriptionProvider {
         let previewSampleCount = min(self.latestStreamingPreviewSampleCount, finalSampleCount)
         let tailSamples = max(0, finalSampleCount - previewSampleCount)
         let tailMs = Int((Double(tailSamples) / 16_000.0 * 1000).rounded())
+        let tailRMS = self.rms(samples: samples, startIndex: previewSampleCount)
         let coverage = finalSampleCount > 0 ? Double(previewSampleCount) / Double(finalSampleCount) : 0
         let ageMs: Int
         if let latestStreamingPreviewFinishedAt {
@@ -262,44 +264,48 @@ final class FluidAudioProvider: TranscriptionProvider {
             """
             ASR_BENCH provider_fast_preview_check finalSamples=\(finalSampleCount) previewSamples=\(previewSampleCount) \
             tailMs=\(tailMs) coverage=\(String(format: "%.3f", coverage)) ageMs=\(ageMs) \
-            textChars=\(text.count) wordBoosting=\(self.isWordBoostingActive)
+            tailRMS=\(String(format: "%.5f", tailRMS)) textChars=\(text.count) wordBoosting=\(self.isWordBoostingActive)
             """,
             source: "ASRBenchmark"
         )
 
         guard !text.isEmpty else {
-            self.logFastPreviewMiss(reason: "empty", tailMs: tailMs, coverage: coverage, ageMs: ageMs)
+            self.logFastPreviewMiss(reason: "empty", tailMs: tailMs, coverage: coverage, ageMs: ageMs, tailRMS: tailRMS)
             return nil
         }
         guard self.latestStreamingPreviewFinishedAt != nil, self.latestStreamingPreviewSampleCount > 0 else {
-            self.logFastPreviewMiss(reason: "missing_preview", tailMs: tailMs, coverage: coverage, ageMs: ageMs)
+            self.logFastPreviewMiss(reason: "missing_preview", tailMs: tailMs, coverage: coverage, ageMs: ageMs, tailRMS: tailRMS)
             return nil
         }
         guard ageMs <= 3000 else {
-            self.logFastPreviewMiss(reason: "stale", tailMs: tailMs, coverage: coverage, ageMs: ageMs)
+            self.logFastPreviewMiss(reason: "stale", tailMs: tailMs, coverage: coverage, ageMs: ageMs, tailRMS: tailRMS)
             return nil
         }
         guard finalSampleCount >= 80_000 else {
-            self.logFastPreviewMiss(reason: "short_recording", tailMs: tailMs, coverage: coverage, ageMs: ageMs)
+            self.logFastPreviewMiss(reason: "short_recording", tailMs: tailMs, coverage: coverage, ageMs: ageMs, tailRMS: tailRMS)
             return nil
         }
         guard finalSampleCount <= 480_000 else {
-            self.logFastPreviewMiss(reason: "long_recording", tailMs: tailMs, coverage: coverage, ageMs: ageMs)
+            self.logFastPreviewMiss(reason: "long_recording", tailMs: tailMs, coverage: coverage, ageMs: ageMs, tailRMS: tailRMS)
             return nil
         }
         guard coverage >= 0.88 else {
-            self.logFastPreviewMiss(reason: "low_coverage", tailMs: tailMs, coverage: coverage, ageMs: ageMs)
+            self.logFastPreviewMiss(reason: "low_coverage", tailMs: tailMs, coverage: coverage, ageMs: ageMs, tailRMS: tailRMS)
             return nil
         }
         guard tailMs <= 1800 else {
-            self.logFastPreviewMiss(reason: "large_tail", tailMs: tailMs, coverage: coverage, ageMs: ageMs)
+            self.logFastPreviewMiss(reason: "large_tail", tailMs: tailMs, coverage: coverage, ageMs: ageMs, tailRMS: tailRMS)
+            return nil
+        }
+        guard tailSamples == 0 || tailRMS <= self.fastPreviewTailSilenceRMS else {
+            self.logFastPreviewMiss(reason: "tail_has_audio", tailMs: tailMs, coverage: coverage, ageMs: ageMs, tailRMS: tailRMS)
             return nil
         }
 
         DebugLogger.shared.info(
             """
             ASR_BENCH provider_fast_preview_hit tailMs=\(tailMs) coverage=\(String(format: "%.3f", coverage)) \
-            ageMs=\(ageMs) textChars=\(text.count)
+            ageMs=\(ageMs) tailRMS=\(String(format: "%.5f", tailRMS)) textChars=\(text.count)
             """,
             source: "ASRBenchmark"
         )
@@ -307,11 +313,23 @@ final class FluidAudioProvider: TranscriptionProvider {
         return ASRTranscriptionResult(text: text, confidence: 0.95)
     }
 
-    private func logFastPreviewMiss(reason: String, tailMs: Int, coverage: Double, ageMs: Int) {
+    private func rms(samples: [Float], startIndex: Int) -> Float {
+        guard startIndex < samples.count else { return 0 }
+        var sum: Float = 0
+        var count: Float = 0
+        for sample in samples[startIndex...] {
+            sum += sample * sample
+            count += 1
+        }
+        guard count > 0 else { return 0 }
+        return sqrt(sum / count)
+    }
+
+    private func logFastPreviewMiss(reason: String, tailMs: Int, coverage: Double, ageMs: Int, tailRMS: Float) {
         DebugLogger.shared.info(
             """
             ASR_BENCH provider_fast_preview_miss reason=\(reason) tailMs=\(tailMs) \
-            coverage=\(String(format: "%.3f", coverage)) ageMs=\(ageMs)
+            coverage=\(String(format: "%.3f", coverage)) ageMs=\(ageMs) tailRMS=\(String(format: "%.5f", tailRMS))
             """,
             source: "ASRBenchmark"
         )

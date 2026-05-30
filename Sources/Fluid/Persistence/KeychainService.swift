@@ -71,7 +71,6 @@ final class KeychainService {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: self.service,
             kSecReturnAttributes as String: true,
-            kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitAll,
         ]
 
@@ -83,8 +82,22 @@ final class KeychainService {
             guard let attributesArray = items as? [[String: Any]] else { return [:] }
             for attributes in attributesArray {
                 guard let providerID = attributes[kSecAttrAccount as String] as? String,
-                      providerID != account,
-                      let data = attributes[kSecValueData as String] as? Data,
+                      providerID != account
+                else {
+                    continue
+                }
+
+                var dataQuery = self.legacyQuery(for: providerID)
+                dataQuery[kSecReturnData as String] = true
+                dataQuery[kSecMatchLimit as String] = kSecMatchLimitOne
+
+                var dataItem: CFTypeRef?
+                let dataStatus = SecItemCopyMatching(dataQuery as CFDictionary, &dataItem)
+                guard dataStatus == errSecSuccess else {
+                    if dataStatus == errSecItemNotFound { continue }
+                    throw KeychainServiceError.unhandled(dataStatus)
+                }
+                guard let data = dataItem as? Data,
                       let key = String(data: data, encoding: .utf8)
                 else {
                     continue
@@ -149,7 +162,6 @@ final class KeychainService {
         let data = try JSONEncoder().encode(keys)
 
         var attributes = self.aggregatedQuery()
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
         attributes[kSecValueData as String] = data
 
         let status = SecItemAdd(attributes as CFDictionary, nil)

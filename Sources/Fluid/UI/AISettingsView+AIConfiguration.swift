@@ -541,9 +541,7 @@ extension AIEnhancementSettingsView {
         }
         if self.expandedProviderID == providerID {
             self.expandedProviderID = nil
-            self.viewModel.showingEditProvider = false
-            self.viewModel.editProviderName = ""
-            self.viewModel.editProviderBaseURL = ""
+            self.viewModel.clearEditProviderDraft()
             self.viewModel.setEditingAPIKey(false, for: providerID)
         } else {
             self.expandedProviderID = providerID
@@ -751,7 +749,7 @@ extension AIEnhancementSettingsView {
         let isCustom = !ModelRepository.shared.isBuiltIn(item.id)
         let baseURL = self.viewModel.openAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let isLocal = self.viewModel.isLocalEndpoint(baseURL)
-        let apiKeyValue = self.viewModel.providerAPIKeys[providerKey] ?? ""
+        let apiKeyValue = self.viewModel.providerAPIKey(for: item.id)
         let hasAPIKey = !apiKeyValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let models = self.viewModel.availableModelsByProvider[providerKey] ?? []
         let hasModels = !models.isEmpty
@@ -761,8 +759,8 @@ extension AIEnhancementSettingsView {
         let canVerify = hasModels && !self.viewModel.selectedModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && canFetchModels
         let isVerified = self.viewModel.connectionStatus(for: item.id) == .success
         let apiKeyBinding = Binding(
-            get: { self.viewModel.providerAPIKeys[providerKey] ?? "" },
-            set: { self.viewModel.providerAPIKeys[providerKey] = $0 }
+            get: { self.viewModel.providerAPIKey(for: item.id) },
+            set: { self.viewModel.updateProviderAPIKey($0, for: item.id, persistEmptyValue: true) }
         )
         let nameBinding = Binding(
             get: { self.viewModel.savedProviders.first(where: { $0.id == item.id })?.name ?? "" },
@@ -854,6 +852,9 @@ extension AIEnhancementSettingsView {
                             .textFieldStyle(.roundedBorder)
                             .font(.system(size: 13))
                             .frame(maxWidth: 200)
+                            .onTapGesture {
+                                self.viewModel.ensureKeychainAccessForAPIKeyEdit()
+                            }
                         if let websiteInfo = ModelRepository.shared.providerWebsiteURL(for: item.id),
                            let url = URL(string: websiteInfo.url)
                         {
@@ -887,7 +888,6 @@ extension AIEnhancementSettingsView {
                         models: models,
                         selectedModel: self.modelBinding(for: item.id),
                         onRefresh: {
-                            self.viewModel.saveProviderAPIKeys()
                             Task { await self.viewModel.fetchModelsForCurrentProvider() }
                         },
                         isRefreshing: isRefreshing,
@@ -922,7 +922,6 @@ extension AIEnhancementSettingsView {
 
                 if canVerify {
                     Button(action: {
-                        self.viewModel.saveProviderAPIKeys()
                         Task { await self.viewModel.testAPIConnection() }
                     }) {
                         HStack(spacing: 6) {
@@ -1040,7 +1039,7 @@ extension AIEnhancementSettingsView {
         let isRefreshing = self.viewModel.isFetchingModels && self.viewModel.selectedProviderID == item.id
         let baseURL = self.providerBaseURL(for: item).trimmingCharacters(in: .whitespacesAndNewlines)
         let isLocal = self.viewModel.isLocalEndpoint(baseURL)
-        let apiKeyValue = self.viewModel.providerAPIKeys[providerKey] ?? ""
+        let apiKeyValue = self.viewModel.providerAPIKey(for: item.id)
         let hasAPIKey = !apiKeyValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let canFetchModels = isLocal ? !baseURL.isEmpty : (hasAPIKey && !baseURL.isEmpty)
         let hasModels = !models.isEmpty
@@ -1092,9 +1091,7 @@ extension AIEnhancementSettingsView {
                 Button("Edit") {
                     self.activateProvider(item.id)
                     if isEditing {
-                        self.viewModel.showingEditProvider = false
-                        self.viewModel.editProviderName = ""
-                        self.viewModel.editProviderBaseURL = ""
+                        self.viewModel.clearEditProviderDraft()
                         self.viewModel.setEditingAPIKey(false, for: item.id)
                     } else {
                         self.viewModel.startEditingProvider()
@@ -1344,11 +1341,10 @@ extension AIEnhancementSettingsView {
     }
 
     var editProviderSection: some View {
-        let providerKey = self.viewModel.providerKey(for: self.viewModel.selectedProviderID)
         let isBuiltIn = ModelRepository.shared.isBuiltIn(self.viewModel.selectedProviderID)
         let apiKeyBinding = Binding(
-            get: { self.viewModel.providerAPIKeys[providerKey] ?? "" },
-            set: { self.viewModel.providerAPIKeys[providerKey] = $0 }
+            get: { self.viewModel.editProviderApiKey },
+            set: { self.viewModel.editProviderApiKey = $0 }
         )
         let isVerified = self.viewModel.connectionStatus(for: self.viewModel.selectedProviderID) == .success
 
@@ -1410,6 +1406,9 @@ extension AIEnhancementSettingsView {
                             .textFieldStyle(.roundedBorder)
                             .font(.system(size: 13))
                             .frame(maxWidth: 200)
+                            .onTapGesture {
+                                self.viewModel.ensureKeychainAccessForAPIKeyEdit()
+                            }
                         if let websiteInfo = ModelRepository.shared.providerWebsiteURL(for: self.viewModel.selectedProviderID),
                            let url = URL(string: websiteInfo.url)
                         {
@@ -1436,11 +1435,11 @@ extension AIEnhancementSettingsView {
 
             HStack(spacing: 10) {
                 Button(action: {
-                    self.viewModel.saveProviderAPIKeys()
+                    guard self.viewModel.saveEditedProviderAPIKey() else { return }
                     if !isBuiltIn {
                         self.viewModel.saveEditedProvider()
                     } else {
-                        self.viewModel.showingEditProvider = false
+                        self.viewModel.clearEditProviderDraft()
                     }
                 }) {
                     HStack(spacing: 6) {
@@ -1455,9 +1454,7 @@ extension AIEnhancementSettingsView {
                         self.viewModel.editProviderBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
 
                 Button("Cancel") {
-                    self.viewModel.showingEditProvider = false
-                    self.viewModel.editProviderName = ""
-                    self.viewModel.editProviderBaseURL = ""
+                    self.viewModel.clearEditProviderDraft()
                 }
                 .buttonStyle(CompactButtonStyle())
             }
@@ -1466,7 +1463,7 @@ extension AIEnhancementSettingsView {
                 if isVerified {
                     Button("Reset Verification") {
                         self.viewModel.resetVerification(for: self.viewModel.selectedProviderID)
-                        self.viewModel.showingEditProvider = false
+                        self.viewModel.clearEditProviderDraft()
                     }
                     .buttonStyle(CompactButtonStyle(foreground: .red, borderColor: .red.opacity(0.6)))
                 }
@@ -1474,7 +1471,7 @@ extension AIEnhancementSettingsView {
                 if !isBuiltIn {
                     Button(role: .destructive) {
                         self.viewModel.deleteCurrentProvider()
-                        self.viewModel.showingEditProvider = false
+                        self.viewModel.clearEditProviderDraft()
                         self.expandedProviderID = nil
                     } label: {
                         HStack(spacing: 6) {
@@ -1842,15 +1839,17 @@ extension AIEnhancementSettingsView {
                 .font(.headline)
             SecureField("API Key (optional for local endpoints)", text: self.$viewModel.newProviderApiKey)
                 .textFieldStyle(.roundedBorder).frame(width: 300)
+                .onTapGesture {
+                    self.viewModel.ensureKeychainAccessForAPIKeyEdit()
+                }
             HStack(spacing: 12) {
                 Button("Cancel") { self.viewModel.showAPIKeyEditor = false }
                     .buttonStyle(CompactButtonStyle())
                     .frame(minWidth: AISettingsLayout.actionMinWidth, minHeight: AISettingsLayout.controlHeight)
                 Button("OK") {
                     let trimmedKey = self.viewModel.newProviderApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let providerKey = self.viewModel.providerKey(for: self.viewModel.selectedProviderID)
-                    self.viewModel.providerAPIKeys[providerKey] = trimmedKey
-                    self.viewModel.saveProviderAPIKeys()
+                    self.viewModel.updateProviderAPIKey(trimmedKey, for: self.viewModel.selectedProviderID)
+                    guard self.viewModel.saveProviderAPIKeys() else { return }
                     if self.viewModel.connectionStatus != .unknown {
                         self.viewModel.connectionStatus = .unknown
                         self.viewModel.connectionErrorMessage = ""
@@ -1904,6 +1903,9 @@ extension AIEnhancementSettingsView {
                     SecureField("Enter API key", text: self.$viewModel.newProviderApiKey)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 13))
+                        .onTapGesture {
+                            self.viewModel.ensureKeychainAccessForAPIKeyEdit()
+                        }
                 }
             }
 

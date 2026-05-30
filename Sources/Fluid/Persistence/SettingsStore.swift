@@ -1173,8 +1173,19 @@ final class SettingsStore: ObservableObject {
         get { (try? self.keychain.fetchAllKeys()) ?? [:] }
         set {
             objectWillChange.send()
-            self.persistProviderAPIKeys(newValue)
+            do {
+                _ = try self.saveProviderAPIKeys(newValue)
+            } catch {
+                self.logProviderAPIKeyPersistenceFailure(error)
+            }
         }
+    }
+
+    @discardableResult
+    func saveProviderAPIKeys(_ values: [String: String]) throws -> [String: String] {
+        let trimmed = self.sanitizeAPIKeys(values)
+        try self.keychain.storeAllKeys(trimmed)
+        return try self.keychain.fetchAllKeys()
     }
 
     /// Securely retrieve API key for a provider, handling custom prefix logic
@@ -2391,16 +2402,11 @@ final class SettingsStore: ObservableObject {
 
     // MARK: - Private Methods
 
-    private func persistProviderAPIKeys(_ values: [String: String]) {
-        let trimmed = self.sanitizeAPIKeys(values)
-        do {
-            try self.keychain.storeAllKeys(trimmed)
-        } catch {
-            DebugLogger.shared.error(
-                "Failed to persist provider API keys: \(error.localizedDescription)",
-                source: "SettingsStore"
-            )
-        }
+    private func logProviderAPIKeyPersistenceFailure(_ error: Error) {
+        DebugLogger.shared.error(
+            "Failed to persist provider API keys: \(error.localizedDescription)",
+            source: "SettingsStore"
+        )
     }
 
     private func migrateTranscriptionStartSoundIfNeeded() {
@@ -2434,7 +2440,11 @@ final class SettingsStore: ObservableObject {
         }
 
         if didMutate {
-            self.persistProviderAPIKeys(merged)
+            do {
+                _ = try self.saveProviderAPIKeys(merged)
+            } catch {
+                self.logProviderAPIKeyPersistenceFailure(error)
+            }
         }
     }
 

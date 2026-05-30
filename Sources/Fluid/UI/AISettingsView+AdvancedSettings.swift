@@ -880,8 +880,7 @@ extension AIEnhancementSettingsView {
     }
 
     private func canFetchModels(for providerID: String) -> Bool {
-        let key = self.viewModel.providerKey(for: providerID)
-        let apiKey = self.viewModel.providerAPIKeys[key] ?? ""
+        let apiKey = self.viewModel.providerAPIKey(for: providerID)
         let hasAPIKey = !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         let baseURL: String

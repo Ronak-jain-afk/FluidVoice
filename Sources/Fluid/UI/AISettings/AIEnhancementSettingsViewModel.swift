@@ -71,6 +71,7 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
     @Published var newProviderModels: String = ""
     @Published var editProviderName: String = ""
     @Published var editProviderBaseURL: String = ""
+    @Published var editProviderApiKey: String = ""
 
     // Keychain State
     @Published var showKeychainPermissionAlert: Bool = false
@@ -227,6 +228,18 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
         return self.providerAPIKeys[key] ?? self.providerAPIKeys[providerID] ?? ""
     }
 
+    func updateProviderAPIKey(_ apiKey: String, for providerID: String, persistEmptyValue: Bool = false) {
+        let key = self.providerKey(for: providerID)
+        let hadDraft = self.providerAPIKeys[key] != nil || self.providerAPIKeys[providerID] != nil
+        self.providerAPIKeys[key] = apiKey
+        if key != providerID {
+            self.providerAPIKeys.removeValue(forKey: providerID)
+        }
+        if persistEmptyValue, hadDraft, apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            _ = self.saveProviderAPIKeys(invalidating: providerID)
+        }
+    }
+
     func providerDisplayName(for providerID: String) -> String {
         switch providerID {
         case "openai": return "OpenAI"
@@ -319,9 +332,23 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
         self.setEditingAPIKey(true, for: providerID)
     }
 
-    func saveProviderAPIKeys() {
-        self.settings.providerAPIKeys = self.providerAPIKeys
-        self.invalidateVerificationIfNeeded(for: self.selectedProviderID)
+    @discardableResult
+    func saveProviderAPIKeys(invalidating providerID: String? = nil) -> Bool {
+        let expected = self.sanitizedAPIKeys(self.providerAPIKeys)
+        let invalidationTarget = providerID ?? self.selectedProviderID
+        do {
+            let persisted = try self.settings.saveProviderAPIKeys(self.providerAPIKeys)
+            guard persisted == expected else {
+                throw ProviderAPIKeySaveError.readbackMismatch
+            }
+            self.providerAPIKeys = persisted
+            self.invalidateVerificationIfNeeded(for: invalidationTarget)
+            return true
+        } catch {
+            self.invalidateVerificationIfNeeded(for: invalidationTarget)
+            self.showKeychainPersistenceFailure(error)
+            return false
+        }
     }
 
     func createDraftProvider(named name: String) -> String? {
@@ -450,14 +477,29 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
         case denied(OSStatus)
     }
 
+    private enum ProviderAPIKeySaveError: LocalizedError {
+        case readbackMismatch
+
+        var errorDescription: String? {
+            "Saved API key could not be read back from Keychain."
+        }
+    }
+
     func handleAPIKeyButtonTapped() {
+        guard self.ensureKeychainAccessForAPIKeyEdit() else { return }
+        self.newProviderApiKey = self.providerAPIKey(for: self.selectedProviderID)
+        self.showAPIKeyEditor = true
+    }
+
+    @discardableResult
+    func ensureKeychainAccessForAPIKeyEdit() -> Bool {
         switch self.probeKeychainAccess() {
         case .granted:
-            self.newProviderApiKey = self.providerAPIKey(for: self.selectedProviderID)
-            self.showAPIKeyEditor = true
+            return true
         case let .denied(status):
             self.keychainPermissionMessage = self.keychainPermissionExplanation(for: status)
             self.showKeychainPermissionAlert = true
+            return false
         }
     }
 
@@ -481,7 +523,6 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
             return .granted
         case errSecItemNotFound:
             var addQuery = query
-            addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
             addQuery[kSecValueData as String] = (try? JSONEncoder().encode([String: String]())) ?? Data()
 
             let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
@@ -511,6 +552,44 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
         }
         message += "\n\nClick \"Always Allow\" when the Keychain prompt appears, or open Keychain Access > login > Passwords, locate the FluidVoice entry, and grant access."
         return message
+    }
+
+    private func keychainPersistenceExplanation(for error: Error) -> String {
+        var message = "FluidVoice could not save the API key to your macOS Keychain, so this provider was not verified."
+        if let keychainError = error as? KeychainServiceError {
+            switch keychainError {
+            case .invalidData:
+                message += "\n\nmacOS returned unreadable Keychain data."
+            case let .unhandled(status):
+                if let detail = SecCopyErrorMessageString(status, nil) as String? {
+                    message += "\n\nmacOS reported: \(detail) (\(status))"
+                } else {
+                    message += "\n\nmacOS reported Keychain status \(status)."
+                }
+            }
+        } else {
+            message += "\n\n\(error.localizedDescription)"
+        }
+        message += "\n\nClick \"Always Allow\" when the Keychain prompt appears, or open Keychain Access > login > Passwords, locate the FluidVoice entry, and grant access."
+        return message
+    }
+
+    private func showKeychainPersistenceFailure(_ error: Error) {
+        self.keychainPermissionMessage = self.keychainPersistenceExplanation(for: error)
+        self.showKeychainPermissionAlert = true
+    }
+
+    private func sanitizedAPIKeys(_ values: [String: String]) -> [String: String] {
+        values.reduce(into: [String: String]()) { partialResult, pair in
+            let sanitizedValue = pair.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard sanitizedValue.isEmpty == false else { return }
+            partialResult[pair.key] = sanitizedValue
+        }
+    }
+
+    private func hasProviderAPIKeyDraft(for providerID: String) -> Bool {
+        let key = self.providerKey(for: providerID)
+        return self.providerAPIKeys[key] != nil || self.providerAPIKeys[providerID] != nil
     }
 
     func presentKeychainAccessAlert(message: String) {
@@ -544,8 +623,13 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
 
         let providerID = self.selectedProviderID
         let providerName = ModelRepository.shared.displayName(for: providerID)
-        let apiKey = self.providerAPIKey(for: providerID)
         let baseURL = self.providerBaseURL(for: providerID)
+        if self.hasProviderAPIKeyDraft(for: providerID), !self.saveProviderAPIKeys(invalidating: providerID) {
+            self.updateConnectionStatus(.failed, for: providerID)
+            self.connectionErrorMessage = "Could not save API key to Keychain. Grant access and try again."
+            return
+        }
+        let apiKey = self.providerAPIKey(for: providerID)
         let isLocal = self.isLocalEndpoint(baseURL)
         let isAnthropic = providerID == "anthropic" || baseURL.contains("anthropic.com")
 
@@ -851,6 +935,7 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
         if ModelRepository.shared.isBuiltIn(self.selectedProviderID) {
             self.editProviderName = ModelRepository.shared.displayName(for: self.selectedProviderID)
             self.editProviderBaseURL = self.openAIBaseURL // Use current URL (may have been customized)
+            self.editProviderApiKey = self.providerAPIKey(for: self.selectedProviderID)
             self.showingEditProvider = true
             return
         }
@@ -858,8 +943,27 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
         if let provider = savedProviders.first(where: { $0.id == selectedProviderID }) {
             self.editProviderName = provider.name
             self.editProviderBaseURL = provider.baseURL
+            self.editProviderApiKey = self.providerAPIKey(for: self.selectedProviderID)
             self.showingEditProvider = true
         }
+    }
+
+    func clearEditProviderDraft() {
+        self.showingEditProvider = false
+        self.editProviderName = ""
+        self.editProviderBaseURL = ""
+        self.editProviderApiKey = ""
+    }
+
+    @discardableResult
+    func saveEditedProviderAPIKey() -> Bool {
+        let previousAPIKeys = self.providerAPIKeys
+        self.updateProviderAPIKey(self.editProviderApiKey, for: self.selectedProviderID)
+        guard self.saveProviderAPIKeys(invalidating: self.selectedProviderID) else {
+            self.providerAPIKeys = previousAPIKeys
+            return false
+        }
+        return true
     }
 
     func deleteCurrentProvider() {
@@ -891,8 +995,7 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
         if ModelRepository.shared.isBuiltIn(self.selectedProviderID) {
             self.openAIBaseURL = base
             self.updateCurrentProvider()
-            self.showingEditProvider = false
-            self.editProviderName = ""; self.editProviderBaseURL = ""
+            self.clearEditProviderDraft()
             self.invalidateVerification(for: self.selectedProviderID)
             return
         }
@@ -906,8 +1009,7 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
             self.openAIBaseURL = base
             self.updateCurrentProvider()
         }
-        self.showingEditProvider = false
-        self.editProviderName = ""; self.editProviderBaseURL = ""
+        self.clearEditProviderDraft()
         self.invalidateVerification(for: self.selectedProviderID)
     }
 
@@ -947,7 +1049,12 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
 
         let baseURL = self.openAIBaseURL
         let key = self.providerKey(for: self.selectedProviderID)
-        let apiKey = self.providerAPIKeys[key] ?? self.providerAPIKeys[self.selectedProviderID]
+        let shouldPersistKey = self.hasProviderAPIKeyDraft(for: self.selectedProviderID)
+        if shouldPersistKey, !self.saveProviderAPIKeys(invalidating: self.selectedProviderID) {
+            self.fetchModelsError = "Could not save API key to Keychain. Grant access and try again."
+            return
+        }
+        let apiKey = self.providerAPIKey(for: self.selectedProviderID)
 
         do {
             let models = try await ModelRepository.shared.fetchModels(
@@ -1010,7 +1117,7 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
     func fetchModels(for providerID: String) async {
         let baseURL = self.providerBaseURL(for: providerID)
         let key = self.providerKey(for: providerID)
-        let apiKey = self.providerAPIKeys[key] ?? self.providerAPIKeys[providerID]
+        let shouldPersistKey = self.hasProviderAPIKeyDraft(for: providerID)
 
         self.refreshingProviderID = providerID
         self.isFetchingModels = true
@@ -1019,6 +1126,13 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
             self.isFetchingModels = false
             self.refreshingProviderID = nil
         }
+
+        if shouldPersistKey, !self.saveProviderAPIKeys(invalidating: providerID) {
+            self.fetchModelsError = "Could not save API key to Keychain. Grant access and try again."
+            return
+        }
+
+        let apiKey = self.providerAPIKey(for: providerID)
 
         do {
             let models = try await ModelRepository.shared.fetchModels(
@@ -1215,15 +1329,24 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
         let models: [String] = []
 
         let newProvider = SettingsStore.SavedProvider(name: name, baseURL: base, models: models)
+        let key = self.providerKey(for: newProvider.id)
+        if !api.isEmpty {
+            var updatedAPIKeys = self.providerAPIKeys
+            updatedAPIKeys[key] = api
+            let previousAPIKeys = self.providerAPIKeys
+            self.providerAPIKeys = updatedAPIKeys
+            guard self.saveProviderAPIKeys(invalidating: newProvider.id) else {
+                self.providerAPIKeys = previousAPIKeys
+                return
+            }
+        }
+
         self.savedProviders.removeAll { $0.name.lowercased() == name.lowercased() }
         self.savedProviders.append(newProvider)
         self.saveSavedProviders()
 
-        let key = self.providerKey(for: newProvider.id)
-        self.providerAPIKeys[key] = api
         self.availableModelsByProvider[key] = models
         self.selectedModelByProvider[key] = models.first ?? self.selectedModel
-        self.settings.providerAPIKeys = self.providerAPIKeys
         self.settings.availableModelsByProvider = self.availableModelsByProvider
         self.settings.selectedModelByProvider = self.selectedModelByProvider
 

@@ -2935,9 +2935,7 @@ final class SettingsStore: ObservableObject {
             case .parakeetRealtime: return "English Only (Live Streaming)"
             case .qwen3Asr: return "30 Languages"
             case .cohereTranscribeSixBit: return "14 Languages (Select Manually)"
-            case .nemotronOffline: return "Multilingual (Manual Language)"
-            case .nemotronStreaming: return "Multilingual (320ms Streaming)"
-            case .nemotronStreaming320: return "Multilingual (320ms Streaming)"
+            case .nemotronOffline, .nemotronStreaming, .nemotronStreaming320: return "Around 40 Languages"
             case .appleSpeech: return "System Languages"
             case .appleSpeechAnalyzer: return "EN, ES, FR, DE, IT, JA, KO, PT, ZH"
             case .whisperTiny, .whisperBase, .whisperSmall, .whisperMedium, .whisperLargeTurbo, .whisperLarge:
@@ -3102,11 +3100,11 @@ final class SettingsStore: ObservableObject {
             case .cohereTranscribeSixBit:
                 return "High-accuracy multilingual transcription. Select the language manually before dictation for best results."
             case .nemotronOffline:
-                return "NVIDIA Nemotron 3.5 multilingual transcription with manual language selection."
+                return "NVIDIA Nemotron 3.5 multilingual transcription. Supports around 40 languages with auto or manual language selection."
             case .nemotronStreaming:
-                return "NVIDIA Nemotron 3.5 low-latency streaming with manual language selection."
+                return "NVIDIA Nemotron 3.5 low-latency streaming. Supports around 40 languages with auto or manual language selection."
             case .nemotronStreaming320:
-                return "NVIDIA Nemotron 3.5 low-latency streaming with manual language selection."
+                return "NVIDIA Nemotron 3.5 low-latency streaming. Supports around 40 languages with auto or manual language selection."
             case .appleSpeech:
                 return "Built-in macOS speech recognition. No download required."
             case .appleSpeechAnalyzer:

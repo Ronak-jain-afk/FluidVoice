@@ -2354,6 +2354,7 @@ final class SettingsStore: ObservableObject {
             cancelRecordingHotkeyShortcut: self.cancelRecordingHotkeyShortcut,
             showThinkingTokens: self.showThinkingTokens,
             hideFromDockAndAppSwitcher: self.hideFromDockAndAppSwitcher,
+            showMainWindowAtLoginLaunch: self.showMainWindowAtLoginLaunch,
             accentColorOption: self.accentColorOption,
             transcriptionStartSound: self.transcriptionStartSound,
             transcriptionSoundVolume: self.transcriptionSoundVolume,
@@ -2435,6 +2436,7 @@ final class SettingsStore: ObservableObject {
         self.cancelRecordingHotkeyShortcut = payload.cancelRecordingHotkeyShortcut
         self.showThinkingTokens = payload.showThinkingTokens
         self.hideFromDockAndAppSwitcher = payload.hideFromDockAndAppSwitcher
+        self.showMainWindowAtLoginLaunch = payload.showMainWindowAtLoginLaunch ?? true
         self.accentColorOption = payload.accentColorOption
         self.transcriptionStartSound = payload.transcriptionStartSound
         self.transcriptionSoundVolume = payload.transcriptionSoundVolume

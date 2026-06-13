@@ -35,6 +35,7 @@ struct SettingsBackupPayload: Codable, Equatable {
     let cancelRecordingHotkeyShortcut: HotkeyShortcut
     let showThinkingTokens: Bool
     let hideFromDockAndAppSwitcher: Bool
+    let showMainWindowAtLoginLaunch: Bool?
     let accentColorOption: SettingsStore.AccentColorOption
     let transcriptionStartSound: SettingsStore.TranscriptionStartSound
     let transcriptionSoundVolume: Float

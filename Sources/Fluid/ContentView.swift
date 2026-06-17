@@ -1061,17 +1061,14 @@ struct ContentView: View {
                 self.settings.onboardingAISkipped = true
                 self.settings.setDictationPromptSelection(.off)
             },
-            markPlaygroundValidated: {
-                self.settings.onboardingPlaygroundValidated = true
-                self.settings.playgroundUsed = true
-                self.playgroundUsed = true
-            },
             finishOnboarding: {
                 self.completeOnboardingIfPossible()
             },
             openAccessibilitySettings: self.openAccessibilitySettings,
             restartApp: self.restartApp,
             menuBarManager: self.menuBarManager,
+            activeShortcutRecordingTarget: self.$activeShortcutRecordingTarget,
+            shortcutRecordingMessage: self.$shortcutRecordingMessage,
             theme: self.theme
         )
         .environmentObject(self.appServices)
@@ -1976,6 +1973,13 @@ struct ContentView: View {
         // This ensures the user's preference for no capitalization/period is respected
         finalText = ASRService.applyGAAVFormatting(finalText)
         self.asr.finalText = finalText
+        if route == .onboardingSandbox,
+           !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            self.settings.onboardingPlaygroundValidated = true
+            self.settings.playgroundUsed = true
+            self.playgroundUsed = true
+        }
 
         DebugLogger.shared.info("Transcription finalized (chars: \(finalText.count))", source: "ContentView")
         let finalTextReadyAt = ProcessInfo.processInfo.systemUptime
@@ -2157,13 +2161,16 @@ struct ContentView: View {
         }
     }
 
-    private func currentDictationOutputRouteForHotkeyStop() -> DictationOutputRoute {
-        let onboardingPlaygroundStep = 5
-        let isOnboardingPlayground = !self.settings.onboardingCompleted &&
+    private var isOnboardingPlaygroundStepActive: Bool {
+        let onboardingPlaygroundStep = 4
+        return !self.settings.onboardingCompleted &&
             self.settings.onboardingCurrentStep == onboardingPlaygroundStep
+    }
+
+    private func currentDictationOutputRouteForHotkeyStop() -> DictationOutputRoute {
         let isDictationMode = self.activeRecordingMode == .dictate || self.activeRecordingMode == .promptMode
 
-        if isOnboardingPlayground && isDictationMode {
+        if self.isOnboardingPlaygroundStepActive && isDictationMode {
             return .onboardingSandbox
         }
         return .normal
@@ -3107,6 +3114,12 @@ extension ContentView {
     private func beginDictationRecording(for slot: SettingsStore.DictationShortcutSlot, mode: ActiveRecordingMode) {
         DebugLogger.shared.debug("Begin dictation recording for slot \(slot.rawValue)", source: "ContentView")
         self.appBench("begin_recording slot=\(slot.rawValue) mode=\(mode.rawValue)")
+        if self.isOnboardingPlaygroundStepActive {
+            self.asr.finalText = ""
+            self.settings.onboardingPlaygroundValidated = false
+            self.settings.playgroundUsed = false
+            self.playgroundUsed = false
+        }
         self.captureRecordingContext()
         self.applyDictationShortcutSelectionContext(for: slot)
         self.setActiveRecordingMode(mode)

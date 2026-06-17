@@ -583,11 +583,12 @@ struct OnboardingFlowView: View {
     let accessibilityEnabled: Bool
     let accessibilitySetupInProgress: Bool
     let markAISkipped: () -> Void
-    let markPlaygroundValidated: () -> Void
     let finishOnboarding: () -> Void
     let openAccessibilitySettings: () -> Void
     let restartApp: () -> Void
     let menuBarManager: MenuBarManager
+    @Binding var activeShortcutRecordingTarget: ShortcutRecordingTarget?
+    @Binding var shortcutRecordingMessage: String?
     let theme: AppTheme
 
     @State private var selectedLanguageID = SettingsStore.shared.onboardingSelectedLanguageID
@@ -636,8 +637,8 @@ struct OnboardingFlowView: View {
         case language = 1
         case voiceModel = 2
         case permissions = 3
-        case aiEnhancement = 4
-        case playground = 5
+        case playground = 4
+        case aiEnhancement = 5
 
         var title: String {
             switch self {
@@ -652,7 +653,7 @@ struct OnboardingFlowView: View {
             case .aiEnhancement:
                 return "Set Up AI Enhancement"
             case .playground:
-                return "Run Playground Test"
+                return "Try FluidVoice"
             }
         }
 
@@ -669,7 +670,7 @@ struct OnboardingFlowView: View {
             case .aiEnhancement:
                 return "Optional: Configure AI post-processing or skip this step."
             case .playground:
-                return "Record a quick sample to validate your setup before finishing."
+                return "Use your dictation shortcut once before finishing setup."
             }
         }
     }
@@ -688,9 +689,9 @@ struct OnboardingFlowView: View {
 
     private var usesCinematicStep: Bool {
         switch self.step {
-        case .landing, .language, .voiceModel, .permissions:
+        case .landing, .language, .voiceModel, .permissions, .playground:
             return true
-        case .aiEnhancement, .playground:
+        case .aiEnhancement:
             return false
         }
     }
@@ -823,6 +824,10 @@ struct OnboardingFlowView: View {
         return display.isEmpty ? "your shortcut" : display
     }
 
+    private var isRecordingAnyShortcut: Bool {
+        self.activeShortcutRecordingTarget != nil
+    }
+
     private var canContinue: Bool {
         guard !self.isModelPreparationInProgress else {
             return false
@@ -840,7 +845,7 @@ struct OnboardingFlowView: View {
         case .aiEnhancement:
             return self.isAIReady
         case .playground:
-            return self.isPlaygroundReady
+            return self.isPlaygroundReady && !self.asr.isRunning && !self.isRecordingAnyShortcut
         }
     }
 
@@ -850,7 +855,7 @@ struct OnboardingFlowView: View {
             return "Next"
         case .language:
             return "Continue"
-        case .playground:
+        case .aiEnhancement:
             return "Finish Setup"
         default:
             return "Continue"
@@ -1331,7 +1336,7 @@ struct OnboardingFlowView: View {
         canContinue: Bool,
         continueAction: @escaping () -> Void
     ) -> some View {
-        let canNavigateBack = !self.isModelPreparationInProgress
+        let canNavigateBack = !self.isModelPreparationInProgress && !self.asr.isRunning && !self.isRecordingAnyShortcut
 
         return HStack {
             self.cinematicFooterButton(
@@ -1433,6 +1438,7 @@ struct OnboardingFlowView: View {
                 self.isShowingAllLanguages = false
                 self.languageSearchText = ""
             }
+            self.resetTryoutValidationForSetupChange()
         }
     }
 
@@ -1694,64 +1700,72 @@ struct OnboardingFlowView: View {
     }
 
     private var playgroundStep: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                ThemedCard(style: .standard) {
-                    VStack(alignment: .leading, spacing: 14) {
-                        HStack {
-                            Text("Quick Playground Test")
-                                .font(self.theme.typography.sectionTitle)
-                            Spacer()
-                            if self.asr.isRunning {
-                                Text("Recording...")
-                                    .font(self.theme.typography.captionStrong)
-                                    .foregroundStyle(.red)
-                            }
-                        }
+        GeometryReader { proxy in
+            ZStack {
+                FluidOnboardingLandingBackdrop(glowCenter: self.landingGlowCenter)
 
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Press Start Recording or use \(self.onboardingShortcutDisplay), then stop and confirm your text appears below.")
-                                .font(self.theme.typography.caption)
-                                .foregroundStyle(.secondary)
+                VStack(spacing: 0) {
+                    FluidOnboardingCompactProgress(value: self.compactProgressValue)
+                        .padding(.top, 28)
 
-                            Button(self.asr.isRunning ? "Stop Recording" : "Start Recording") {
-                                self.togglePlaygroundRecording()
-                            }
-                            .fluidButton(.primary, size: .large, isRecording: self.asr.isRunning)
-                            .disabled(self.asr.micStatus != .authorized)
-                        }
+                    Color.clear
+                        .frame(height: 34)
 
-                        TextEditor(text: Binding(
-                            get: { self.asr.finalText },
-                            set: { self.asr.finalText = $0 }
-                        ))
-                        .font(self.theme.typography.body)
-                        .frame(height: 170)
-                        .fluidOnboardingEditorSurface()
-                        .scrollContentBackground(.hidden)
+                    VStack(spacing: 0) {
+                        FluidOnboardingCompactAppIconMark(size: 66)
+                            .padding(.bottom, 22)
 
-                        if self.isPlaygroundReady {
-                            HStack(spacing: 6) {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(self.theme.palette.success)
-                                Text("Playground test passed. You can finish setup.")
-                                    .font(self.theme.typography.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        } else {
-                            Text("Record a short sample with the button or your hotkey and confirm transcription appears here.")
-                                .font(self.theme.typography.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                        Text("FluidVoice is ready.")
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.74)
+                            .padding(.horizontal, 32)
+                            .padding(.bottom, 14)
+
+                        Text("Now let's try it out.")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(Color.white.opacity(0.62))
+                            .padding(.bottom, 28)
+
+                        OnboardingTryoutStepView(
+                            finalText: Binding(
+                                get: { self.asr.finalText },
+                                set: { self.asr.finalText = $0 }
+                            ),
+                            language: self.selectedOnboardingLanguage,
+                            shortcutDisplay: self.onboardingShortcutDisplay,
+                            isReady: self.isPlaygroundReady,
+                            isRunning: self.asr.isRunning,
+                            isRecordingShortcut: self.activeShortcutRecordingTarget == .primaryDictation,
+                            shortcutRecordingMessage: self.activeShortcutRecordingTarget == .primaryDictation ? self.shortcutRecordingMessage : nil,
+                            onToggleShortcut: self.togglePrimaryShortcutRecording
+                        )
                     }
-                    .padding(16)
+                    .frame(maxWidth: .infinity)
+
+                    Spacer(minLength: 28)
+
+                    self.cinematicFooter(
+                        continueTitle: "Continue",
+                        canContinue: self.canContinue
+                    ) {
+                        self.handlePrimaryAction()
+                    }
                 }
-            }
-            .padding(24)
-        }
-        .onChange(of: self.asr.finalText) { _, newValue in
-            if !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                self.markPlaygroundValidated()
+                .frame(width: proxy.size.width, height: proxy.size.height)
+
+                FluidOnboardingLandingHoverTracker(
+                    onMove: { location, size in
+                        self.updateLandingGlow(location: location, in: size)
+                    },
+                    onExit: {
+                        self.resetLandingGlow()
+                    }
+                )
+                .frame(width: proxy.size.width, height: proxy.size.height)
+                .accessibilityHidden(true)
             }
         }
     }
@@ -1773,7 +1787,7 @@ struct OnboardingFlowView: View {
             if self.step == .aiEnhancement {
                 Button("Skip this step") {
                     self.markAISkipped()
-                    self.goNext()
+                    self.finishOnboarding()
                 }
                 .fluidOnboardingSecondaryButton()
             }
@@ -1873,7 +1887,7 @@ struct OnboardingFlowView: View {
     }
 
     private func isOnboardingModelBundledOrInstalled(_ model: SettingsStore.SpeechModel) -> Bool {
-        model == .appleSpeech || (model != .appleSpeechAnalyzer && model.isInstalled)
+        model.isInstalled
     }
 
     private func isPreparingOnboardingModel(_ model: SettingsStore.SpeechModel) -> Bool {
@@ -2492,6 +2506,7 @@ struct OnboardingFlowView: View {
         }
 
         if oldModel != self.settings.selectedSpeechModel || languageChanged {
+            self.resetTryoutValidationForSetupChange()
             self.asr.resetTranscriptionProvider()
         }
     }
@@ -2529,6 +2544,23 @@ struct OnboardingFlowView: View {
         }
     }
 
+    private func togglePrimaryShortcutRecording() {
+        guard !self.asr.isRunning else { return }
+        if self.activeShortcutRecordingTarget == .primaryDictation {
+            self.activeShortcutRecordingTarget = nil
+            self.shortcutRecordingMessage = nil
+        } else {
+            self.shortcutRecordingMessage = nil
+            self.activeShortcutRecordingTarget = .primaryDictation
+        }
+    }
+
+    private func resetTryoutValidationForSetupChange() {
+        self.settings.onboardingPlaygroundValidated = false
+        self.settings.playgroundUsed = false
+        self.asr.finalText = ""
+    }
+
     private func handleMicrophoneAction() {
         if self.asr.micStatus == .notDetermined {
             self.asr.requestMicAccess()
@@ -2538,10 +2570,14 @@ struct OnboardingFlowView: View {
     }
 
     private func goBack() {
+        self.activeShortcutRecordingTarget = nil
+        self.shortcutRecordingMessage = nil
         self.currentStep = max(0, self.currentStep - 1)
     }
 
     private func goNext() {
+        self.activeShortcutRecordingTarget = nil
+        self.shortcutRecordingMessage = nil
         self.currentStep = min(Step.allCases.count - 1, self.currentStep + 1)
     }
 
@@ -2554,29 +2590,11 @@ struct OnboardingFlowView: View {
             self.selectOnboardingRoute(route)
         }
 
-        if self.step == .playground {
-            if !self.settings.onboardingPlaygroundValidated {
-                self.markPlaygroundValidated()
-            }
+        if self.step == .aiEnhancement {
+            guard self.isAIReady else { return }
             self.finishOnboarding()
             return
         }
         self.goNext()
-    }
-
-    private func togglePlaygroundRecording() {
-        Task { @MainActor in
-            if self.asr.isRunning {
-                let transcribed = await self.asr.stop()
-                _ = self.asr.consumeLastCompletedAudioSnapshot()
-                self.asr.finalText = ASRService.applyGAAVFormatting(transcribed)
-                if !self.asr.finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    self.markPlaygroundValidated()
-                }
-            } else {
-                self.asr.finalText = ""
-                await self.asr.start()
-            }
-        }
     }
 }

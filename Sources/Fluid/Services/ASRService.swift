@@ -2923,6 +2923,47 @@ final class ASRService: ObservableObject {
 
         return result
     }
+
+    // MARK: - Continuous Dictation Mode Formatting
+
+    /// Applies Continuous Dictation Mode formatting so transcribed segments chain naturally.
+    /// - Appends a trailing space so the next dictation continues without a manual spacebar press.
+    /// - Adjusts capitalization based on the text already in the field: if the preceding text
+    ///   (after trimming trailing whitespace) ends with sentence-ending punctuation (.!?), the
+    ///   first character is capitalized; otherwise it is lowercased so segments flow inline.
+    ///   An empty field is treated as a sentence start (capitalized).
+    /// Only applied when `continuousDictationModeEnabled` is on.
+    ///
+    /// Implements the chaining behavior requested in GitHub issue #390.
+    static func applyContinuousDictationFormatting(_ text: String, precedingText: String) -> String {
+        guard SettingsStore.shared.continuousDictationModeEnabled else { return text }
+        guard !text.isEmpty else { return text }
+
+        var result = text
+
+        let precedingTrimmed = precedingText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if precedingTrimmed.isEmpty {
+            // Empty field = sentence start: capitalize first alphabetic character.
+            if let first = result.first, first.isLetter, first.isLowercase {
+                result = first.uppercased() + result.dropFirst()
+            }
+        } else if let lastChar = precedingTrimmed.last, lastChar.isLetter || lastChar.isNumber {
+            // Last char before cursor is alphanumeric (no terminal punctuation): lowercase the
+            // first character so this segment flows inline with the existing text.
+            if let first = result.first, first.isUppercase {
+                result = first.lowercased() + result.dropFirst()
+            }
+        }
+        // If preceding text ends with .!? (or any other punctuation), leave the model's
+        // capitalization as-is (sentence start).
+
+        // Append a trailing space so the next dictation chains without a manual spacebar press.
+        if !result.hasSuffix(" ") {
+            result += " "
+        }
+
+        return result
+    }
 }
 
 // swiftlint:enable type_body_length

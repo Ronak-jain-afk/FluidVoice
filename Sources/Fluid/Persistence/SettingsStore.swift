@@ -2688,6 +2688,7 @@ final class SettingsStore: ObservableObject {
             fillerWords: self.fillerWords,
             removeFillerWordsEnabled: self.removeFillerWordsEnabled,
             gaavModeEnabled: self.gaavModeEnabled,
+            continuousDictationModeEnabled: self.continuousDictationModeEnabled,
             pauseMediaDuringTranscription: self.pauseMediaDuringTranscription,
             vocabularyBoostingEnabled: self.vocabularyBoostingEnabled,
             customDictionaryEntries: self.customDictionaryEntries,
@@ -2779,6 +2780,7 @@ final class SettingsStore: ObservableObject {
         self.fillerWords = payload.fillerWords
         self.removeFillerWordsEnabled = payload.removeFillerWordsEnabled
         self.gaavModeEnabled = payload.gaavModeEnabled
+        self.continuousDictationModeEnabled = payload.continuousDictationModeEnabled
         self.pauseMediaDuringTranscription = payload.pauseMediaDuringTranscription
         self.vocabularyBoostingEnabled = payload.vocabularyBoostingEnabled
         self.customDictionaryEntries = payload.customDictionaryEntries
@@ -3369,6 +3371,20 @@ final class SettingsStore: ObservableObject {
         set {
             objectWillChange.send()
             self.defaults.set(newValue, forKey: Keys.gaavModeEnabled)
+        }
+    }
+
+    // MARK: - Continuous Dictation Mode
+
+    /// Continuous Dictation Mode: Appends a trailing space to transcriptions and adjusts
+    /// capitalization based on the text already in the focused field, so multiple dictation
+    /// segments chain naturally without manual spacebar presses.
+    /// Implements the chaining behavior requested in GitHub issue #390.
+    var continuousDictationModeEnabled: Bool {
+        get { self.defaults.object(forKey: Keys.continuousDictationModeEnabled) as? Bool ?? false }
+        set {
+            objectWillChange.send()
+            self.defaults.set(newValue, forKey: Keys.continuousDictationModeEnabled)
         }
     }
 
@@ -4203,6 +4219,9 @@ private extension SettingsStore {
 
         /// GAAV Mode (removes capitalization and trailing punctuation)
         static let gaavModeEnabled = "GAAVModeEnabled"
+
+        /// Continuous Dictation Mode (append trailing space + smart caps for chaining)
+        static let continuousDictationModeEnabled = "ContinuousDictationModeEnabled"
 
         // Custom Dictionary
         static let customDictionaryEntries = "CustomDictionaryEntries"

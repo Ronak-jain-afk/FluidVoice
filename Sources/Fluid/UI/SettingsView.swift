@@ -878,6 +878,17 @@ struct SettingsView: View {
                                     Divider().opacity(0.2)
 
                                     self.optionToggleRow(
+                                        title: "Continuous Dictation Mode",
+                                        description: "Append a trailing space and adjust capitalization so consecutive dictations chain naturally. "
+                                            + "Smart caps: if the text in the field ends with a period, the next segment starts capitalized; otherwise it flows inline.",
+                                        isOn: Binding(
+                                            get: { SettingsStore.shared.continuousDictationModeEnabled },
+                                            set: { SettingsStore.shared.continuousDictationModeEnabled = $0 }
+                                        )
+                                    )
+                                    Divider().opacity(0.2)
+
+                                    self.optionToggleRow(
                                         title: "Pause Media During Transcription",
                                         description: "Automatically pause currently playing audio/video when transcription starts. Resumes only if FluidVoice paused it.",
                                         isOn: Binding(

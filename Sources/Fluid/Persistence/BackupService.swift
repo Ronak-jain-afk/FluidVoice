@@ -67,6 +67,7 @@ struct SettingsBackupPayload: Codable, Equatable {
     let fillerWords: [String]
     let removeFillerWordsEnabled: Bool
     let gaavModeEnabled: Bool
+    let continuousDictationModeEnabled: Bool
     let pauseMediaDuringTranscription: Bool
     let vocabularyBoostingEnabled: Bool
     let customDictionaryEntries: [SettingsStore.CustomDictionaryEntry]

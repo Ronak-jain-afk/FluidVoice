@@ -112,7 +112,7 @@ enum ShortcutRecordingTarget: Hashable {
 
 // NOTE: Streaming and AI response parsing is now handled by LLMClient
 
-// swiftlint:disable type_body_length
+// swiftlint:disable type_body_length file_length
 struct ContentView: View {
     private enum ActiveRecordingMode: String {
         case none
@@ -178,6 +178,7 @@ struct ContentView: View {
     @State private var previousSidebarItem: SidebarItem? = nil // Track previous for mode transitions
     @State private var playgroundUsed: Bool = SettingsStore.shared.playgroundUsed
     @State private var recordingAppInfo: (name: String, bundleId: String, windowTitle: String)? = nil
+    @State private var recordingPrecedingText: String = ""
 
     // Command Mode State
     // @State private var showCommandMode: Bool = false
@@ -1442,6 +1443,18 @@ struct ContentView: View {
             "Captured recording app context: app=\(info.name), bundleId=\(info.bundleId), title=\(info.windowTitle)",
             source: "ContentView"
         )
+
+        // Capture text before the caret for Continuous Dictation Mode smart caps.
+        // Only read the field when the feature is enabled (low-resource: one AX round-trip).
+        if SettingsStore.shared.continuousDictationModeEnabled {
+            self.recordingPrecedingText = TypingService.textBeforeCursorInFocusedField()
+            DebugLogger.shared.debug(
+                "Captured preceding text for continuous dictation (chars=\(self.recordingPrecedingText.count))",
+                source: "ContentView"
+            )
+        } else {
+            self.recordingPrecedingText = ""
+        }
     }
 
     private func resolveTypingTargetPID() -> (pid: pid_t?, shouldRestoreOriginalFocus: Bool) {
@@ -2062,6 +2075,10 @@ struct ContentView: View {
         // Apply GAAV formatting as the FINAL step (after AI post-processing)
         // This ensures the user's preference for no capitalization/period is respected
         finalText = ASRService.applyGAAVFormatting(finalText)
+        // Apply Continuous Dictation Mode after GAAV so smart caps use the field
+        // context captured at recording start, and the trailing space enables chaining.
+        finalText = ASRService.applyContinuousDictationFormatting(finalText, precedingText: self.recordingPrecedingText)
+        self.recordingPrecedingText = ""
         self.asr.finalText = finalText
         if route == .onboardingSandbox,
            self.isOnboardingVoicePlaygroundStepActive,
@@ -2353,7 +2370,11 @@ struct ContentView: View {
             self.cancelPrewarmDictationIfNeeded()
         }
 
-        let finalText = ASRService.applyGAAVFormatting(text)
+        let gaavText = ASRService.applyGAAVFormatting(text)
+        let precedingText = SettingsStore.shared.continuousDictationModeEnabled
+            ? TypingService.textBeforeCursorInFocusedField()
+            : ""
+        let finalText = ASRService.applyContinuousDictationFormatting(gaavText, precedingText: precedingText)
         let appInfo = self.getCurrentAppInfo()
 
         if saveToHistory, SettingsStore.shared.saveTranscriptionHistory {
@@ -2431,6 +2452,8 @@ struct ContentView: View {
         self.menuBarManager.setProcessing(false)
 
         finalText = ASRService.applyGAAVFormatting(finalText)
+        finalText = ASRService.applyContinuousDictationFormatting(finalText, precedingText: self.recordingPrecedingText)
+        self.recordingPrecedingText = ""
 
         if SettingsStore.shared.saveTranscriptionHistory {
             TranscriptionHistoryStore.shared.addEntry(

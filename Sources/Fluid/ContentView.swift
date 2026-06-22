@@ -885,6 +885,7 @@ struct ContentView: View {
     private func shortcutConflictMessage(for shortcut: HotkeyShortcut, target: ShortcutRecordingTarget) -> String? {
         let configuredShortcuts: [(ShortcutRecordingTarget, HotkeyShortcut)] = [
             (.primaryDictation, self.hotkeyShortcut),
+            (.secondaryDictation, self.promptModeHotkeyShortcut),
             (.command, self.commandModeHotkeyShortcut),
             (.edit, self.rewriteModeHotkeyShortcut),
             (.cancel, self.cancelRecordingHotkeyShortcut),

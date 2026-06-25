@@ -52,6 +52,9 @@ final class BottomOverlayWindowController {
     }
 
     func show(audioPublisher: AnyPublisher<CGFloat, Never>, mode: OverlayMode) {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        Self.overlayBench("bottom_show_start mode=\(mode.rawValue) windowExists=\(self.window != nil)")
+
         self.endReleaseTransition(flushDeferredUpdate: false)
         self.pendingResizeWorkItem?.cancel()
         self.pendingResizeWorkItem = nil
@@ -88,18 +91,17 @@ final class BottomOverlayWindowController {
         self.targetScreen = OverlayScreenResolver.screenForCurrentPointer()
         self.positionWindow()
 
-        // Show with animation
-        self.window?.alphaValue = 0
+        // Show immediately; ASR startup can delay AppKit animation completions.
+        self.window?.alphaValue = 1
         self.window?.orderFrontRegardless()
-
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.25
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            self.window?.animator().alphaValue = 1
-        }
+        Self.overlayBench("bottom_order_front elapsedMs=\(Self.elapsedMs(since: startedAt))")
+        Self.overlayBench("bottom_fade_complete elapsedMs=\(Self.elapsedMs(since: startedAt))")
     }
 
     func hide() {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        Self.overlayBench("bottom_hide_start windowExists=\(self.window != nil)")
+
         // Cancel audio subscription
         self.audioSubscription?.cancel()
         self.audioSubscription = nil
@@ -120,6 +122,7 @@ final class BottomOverlayWindowController {
         guard let window = window else {
             self.endReleaseTransition(flushDeferredUpdate: false)
             NotchContentState.shared.setBottomOverlayDismissing(false)
+            Self.overlayBench("bottom_hide_return reason=no_window")
             return
         }
 
@@ -127,20 +130,15 @@ final class BottomOverlayWindowController {
         NotchContentState.shared.setBottomOverlayDismissOffsetY(28)
         NotchContentState.shared.setBottomOverlayDismissing(true)
 
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.2
-            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
-            window.animator().alphaValue = 0
-        } completionHandler: {
-            window.orderOut(nil)
-            Task { @MainActor in
-                self.endReleaseTransition(flushDeferredUpdate: false)
-                NotchContentState.shared.setBottomOverlayDismissing(false)
-            }
-        }
+        window.alphaValue = 0
+        window.orderOut(nil)
+        self.endReleaseTransition(flushDeferredUpdate: false)
+        NotchContentState.shared.setBottomOverlayDismissing(false)
+        Self.overlayBench("bottom_hide_complete elapsedMs=\(Self.elapsedMs(since: startedAt))")
     }
 
     func setProcessing(_ processing: Bool) {
+        Self.overlayBench("bottom_set_processing processing=\(processing)")
         NotchContentState.shared.setProcessing(processing)
     }
 
@@ -184,6 +182,14 @@ final class BottomOverlayWindowController {
         if shouldFlush, self.window?.isVisible == true {
             self.scheduleSizeAndPositionUpdate(after: 0)
         }
+    }
+
+    private static func overlayBench(_ message: String) {
+        DebugLogger.shared.benchmark("OVERLAY_BENCH", message: message, source: "OverlayBenchmark")
+    }
+
+    private static func elapsedMs(since start: TimeInterval) -> Int {
+        Int(((ProcessInfo.processInfo.systemUptime - start) * 1000).rounded())
     }
 
     private func scheduleSizeAndPositionUpdate(after delay: TimeInterval = 0.08) {
@@ -251,7 +257,7 @@ final class BottomOverlayWindowController {
         panel.animationBehavior = .none
 
         let contentView = BottomOverlayView()
-        let hostingView = NSHostingView(rootView: contentView)
+        let hostingView = BottomOverlayHostingView(rootView: contentView)
 
         // Let SwiftUI determine the size
         let fittingSize = hostingView.fittingSize
@@ -1284,6 +1290,10 @@ private struct BottomOverlayPromptMenuView: View {
     let onDismissRequested: () -> Void
     @State private var hoveredRowID: String?
 
+    private var privateAILocked: Bool {
+        self.promptMode.normalized == .dictate && PrivateAIProviderPromptFormat.isAvailable(settings: self.settings)
+    }
+
     private func rowBackground(isSelected: Bool, rowID: String) -> some View {
         let isHovered = self.hoveredRowID == rowID
         let fillColor: Color
@@ -1346,10 +1356,11 @@ private struct BottomOverlayPromptMenuView: View {
     @ViewBuilder
     private func defaultRow(selectedID: String?) -> some View {
         let activeSlot = self.contentState.activeDictationShortcutSlot ?? .primary
-        let isSelected = self.promptMode.normalized == .dictate
+        let isSelected = !self.privateAILocked && (self.promptMode.normalized == .dictate
             ? (self.settings.dictationPromptSelection(for: activeSlot) == .default)
-            : (selectedID == nil)
+            : (selectedID == nil))
         Button(action: {
+            guard !self.privateAILocked else { return }
             if self.promptMode.normalized == .dictate {
                 self.contentState.onDictationPromptSelectionRequested?(.default)
             } else {
@@ -1371,18 +1382,53 @@ private struct BottomOverlayPromptMenuView: View {
             .background(self.rowBackground(isSelected: isSelected, rowID: "default"))
         }
         .buttonStyle(.plain)
+        .disabled(self.privateAILocked)
+        .opacity(self.privateAILocked ? 0.45 : 1)
         .onHover { hovering in
-            self.hoveredRowID = hovering ? "default" : nil
+            self.hoveredRowID = hovering && !self.privateAILocked ? "default" : nil
+        }
+    }
+
+    @ViewBuilder
+    private func privateAIRow() -> some View {
+        let activeSlot = self.contentState.activeDictationShortcutSlot ?? .primary
+        let isAvailable = PrivateAIProviderPromptFormat.isAvailable(settings: self.settings)
+        let isSelected = self.settings.dictationPromptSelection(for: activeSlot) == .privateAI
+        Button(action: {
+            guard isAvailable else { return }
+            self.contentState.onDictationPromptSelectionRequested?(.privateAI)
+            self.restoreTypingTargetApp()
+            self.onDismissRequested()
+        }) {
+            HStack {
+                Text(PrivateAIProviderFeature.displayName)
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(self.rowBackground(isSelected: isSelected, rowID: PrivateAIProviderFeature.shared.providerID))
+        }
+        .buttonStyle(.plain)
+        .disabled(!isAvailable)
+        .opacity(isAvailable ? 1 : 0.45)
+        .help(isAvailable ? "Use \(PrivateAIProviderFeature.displayName)" : "Select \(PrivateAIProviderFeature.displayName) to enable this prompt")
+        .onHover { hovering in
+            self.hoveredRowID = hovering && isAvailable ? PrivateAIProviderFeature.shared.providerID : nil
         }
     }
 
     @ViewBuilder
     private func profileRow(_ profile: SettingsStore.DictationPromptProfile, selectedID: String?) -> some View {
         let activeSlot = self.contentState.activeDictationShortcutSlot ?? .primary
-        let isSelected = self.promptMode.normalized == .dictate
+        let isSelected = !self.privateAILocked && (self.promptMode.normalized == .dictate
             ? (self.settings.dictationPromptSelection(for: activeSlot) == .profile(profile.id))
-            : (selectedID == profile.id)
+            : (selectedID == profile.id))
         Button(action: {
+            guard !self.privateAILocked else { return }
             if self.promptMode.normalized == .dictate {
                 self.contentState.onDictationPromptSelectionRequested?(.profile(profile.id))
             } else {
@@ -1404,8 +1450,10 @@ private struct BottomOverlayPromptMenuView: View {
             .background(self.rowBackground(isSelected: isSelected, rowID: profile.id))
         }
         .buttonStyle(.plain)
+        .disabled(self.privateAILocked)
+        .opacity(self.privateAILocked ? 0.45 : 1)
         .onHover { hovering in
-            self.hoveredRowID = hovering ? profile.id : nil
+            self.hoveredRowID = hovering && !self.privateAILocked ? profile.id : nil
         }
     }
 
@@ -1421,9 +1469,15 @@ private struct BottomOverlayPromptMenuView: View {
                     .padding(.vertical, 4)
             }
 
-            self.defaultRow(selectedID: selectedID)
+            if !self.privateAILocked {
+                self.defaultRow(selectedID: selectedID)
+            }
 
-            if !profiles.isEmpty {
+            if self.promptMode.normalized == .dictate && PrivateFeatures.privateAIProvider {
+                self.privateAIRow()
+            }
+
+            if !self.privateAILocked && !profiles.isEmpty {
                 Divider()
                     .padding(.vertical, 4)
 
@@ -1693,6 +1747,28 @@ private struct PromptSelectorAnchorReader: NSViewRepresentable {
     }
 }
 
+private enum PillShadowMetrics {
+    // Keep in sync with the pill shadow in BottomOverlayView.body.
+    static let radius: CGFloat = 10
+    static let yOffset: CGFloat = 4
+    // Hit-test inset must cover the visible shadow extent (radius + |offset|)
+    // plus a small margin so the shadow region doesn't intercept clicks.
+    static let hitTestInset: CGFloat = radius + abs(yOffset) + 12
+}
+
+private final class BottomOverlayHostingView: NSHostingView<BottomOverlayView> {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if SettingsStore.shared.overlaySize == .pill {
+            let visibleOverlayBounds = self.bounds.insetBy(
+                dx: PillShadowMetrics.hitTestInset,
+                dy: PillShadowMetrics.hitTestInset
+            )
+            guard visibleOverlayBounds.contains(point) else { return nil }
+        }
+        return super.hitTest(point)
+    }
+}
+
 private struct DynamicPreviewHeightPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
@@ -1713,6 +1789,7 @@ struct BottomOverlayView: View {
     @ObservedObject private var historyStore = TranscriptionHistoryStore.shared
     @ObservedObject private var settings = SettingsStore.shared
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHoveringModeChip = false
     @State private var isHoveringPromptChip = false
     @State private var isHoveringActionsChip = false
@@ -1757,22 +1834,22 @@ struct BottomOverlayView: View {
             switch size {
             case .pill:
                 return LayoutConstants(
-                    hPadding: 10,
-                    vPadding: 7,
-                    waveformWidth: 42,
-                    waveformHeight: 16,
+                    hPadding: 12,
+                    vPadding: 8,
+                    waveformWidth: 46,
+                    waveformHeight: 30,
                     iconSize: 18,
                     transFontSize: 10,
                     modeFontSize: 9,
-                    cornerRadius: 16,
+                    cornerRadius: 23,
                     barCount: 8,
-                    barWidth: 2.5,
-                    barSpacing: 2.0,
-                    minBarHeight: 3,
-                    maxBarHeight: 15,
-                    containerWidth: 88,
-                    overlayWidth: 88,
-                    overlayHeight: 32,
+                    barWidth: 3.0,
+                    barSpacing: 2.5,
+                    minBarHeight: 4,
+                    maxBarHeight: 28,
+                    containerWidth: 100,
+                    overlayWidth: 100,
+                    overlayHeight: 46,
                     previewBoxHeight: 0,
                     usesFixedCanvas: false,
                     showsTopControls: false,
@@ -1861,6 +1938,10 @@ struct BottomOverlayView: View {
 
     private var isCompactControls: Bool {
         self.settings.overlaySize == .medium
+    }
+
+    private var isPillSize: Bool {
+        self.settings.overlaySize == .pill
     }
 
     private var modeColor: Color {
@@ -1982,7 +2063,7 @@ struct BottomOverlayView: View {
 
         let maxLength: Int
         if self.isCompactControls {
-            maxLength = self.isAppPromptOverrideActive ? 6 : 11
+            maxLength = self.isAppPromptOverrideActive ? 8 : 14
         } else {
             maxLength = self.isAppPromptOverrideActive ? 11 : 16
         }
@@ -2001,7 +2082,7 @@ struct BottomOverlayView: View {
     }
 
     private var promptSelectorChipWidth: CGFloat {
-        self.isCompactControls ? 100 : 164
+        self.isCompactControls ? 118 : 164
     }
 
     private var promptSelectorVerticalPadding: CGFloat {
@@ -2072,12 +2153,17 @@ struct BottomOverlayView: View {
         self.shouldReservePreviewArea && self.contentState.isProcessing && self.processingStatusVisible
     }
 
+    private var shouldShowAIProcessingFailure: Bool {
+        self.shouldReservePreviewArea && self.contentState.isAIProcessingFailureVisible && !self.contentState.isProcessing
+    }
+
     private var shouldSuppressPreviewDuringRelease: Bool {
         self.contentState.isBottomOverlayReleaseTransitioning || self.contentState.isBottomOverlayDismissing
     }
 
     private func previewResizeBucket(for previewText: String) -> Int {
         guard self.shouldReservePreviewArea else { return 0 }
+        if self.shouldShowAIProcessingFailure { return 1 }
         let trimmed = previewText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return self.shouldShowProcessingStatus ? 1 : 0 }
 
@@ -2118,11 +2204,19 @@ struct BottomOverlayView: View {
     }
 
     private var overlayBorderTopOpacity: Double {
-        self.settings.overlaySize == .large ? 0.10 : 0.15
+        switch self.settings.overlaySize {
+        case .pill: return 0.22 // a touch crisper so the smaller pill reads clearly
+        case .large: return 0.10
+        default: return 0.15
+        }
     }
 
     private var overlayBorderBottomOpacity: Double {
-        self.settings.overlaySize == .large ? 0.05 : 0.08
+        switch self.settings.overlaySize {
+        case .pill: return 0.10
+        case .large: return 0.05
+        default: return 0.08
+        }
     }
 
     private var overlayAnimatedOffsetY: CGFloat {
@@ -2475,6 +2569,44 @@ struct BottomOverlayView: View {
         .help("Open Preferences")
     }
 
+    private func failureIconButton(systemName: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: max(self.layout.transFontSize - 1, 10), weight: .semibold))
+                .foregroundStyle(.white.opacity(0.86))
+                .frame(width: 20, height: 20)
+                .background(
+                    Circle()
+                        .fill(Color.white.opacity(0.12))
+                )
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    private var aiProcessingFailureView: some View {
+        HStack(spacing: 8) {
+            Text("AI Enhancement failed")
+                .font(.system(size: self.layout.transFontSize, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.9))
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Spacer(minLength: 4)
+
+            self.failureIconButton(systemName: "arrow.clockwise", help: "Try again") {
+                self.contentState.clearAIProcessingFailure()
+                self.contentState.onReprocessLastRequested?()
+            }
+
+            self.failureIconButton(systemName: "xmark", help: "Dismiss") {
+                self.contentState.clearAIProcessingFailure()
+                NotchOverlayManager.shared.hide()
+            }
+        }
+        .frame(maxWidth: self.previewMaxWidth, alignment: .leading)
+    }
+
     var body: some View {
         VStack(spacing: max(4, self.layout.vPadding / 2)) {
             if self.layout.showsTopControls {
@@ -2498,6 +2630,8 @@ struct BottomOverlayView: View {
                         Group {
                             if self.shouldSuppressPreviewDuringRelease {
                                 Color.clear
+                            } else if self.shouldShowAIProcessingFailure {
+                                self.aiProcessingFailureView
                             } else if self.shouldShowProcessingStatus {
                                 // Temporarily hidden; the waveform sweep carries processing state.
                                 // ShimmerText(
@@ -2554,6 +2688,8 @@ struct BottomOverlayView: View {
                         Group {
                             if self.shouldSuppressPreviewDuringRelease {
                                 Color.clear
+                            } else if self.shouldShowAIProcessingFailure {
+                                self.aiProcessingFailureView
                             } else if self.hasTranscription && !self.contentState.isProcessing {
                                 let previewText = self.transcriptionPreviewText
                                 if !previewText.isEmpty {
@@ -2664,23 +2800,74 @@ struct BottomOverlayView: View {
             .frame(maxWidth: .infinity, alignment: .center)
             .background(
                 ZStack {
-                    // Solid pitch black background
+                    // Solid pitch black background, with a soft drop shadow so the pill lifts
+                    // off whatever is behind it (pill size only; outer padding reserves room).
                     RoundedRectangle(cornerRadius: self.layout.cornerRadius)
                         .fill(Color.black)
-
-                    // Inner border
-                    RoundedRectangle(cornerRadius: self.layout.cornerRadius)
-                        .strokeBorder(
-                            LinearGradient(
-                                colors: [
-                                    Color.white.opacity(self.overlayBorderTopOpacity),
-                                    Color.white.opacity(self.overlayBorderBottomOpacity),
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            ),
-                            lineWidth: self.overlayBorderLineWidth
+                        .shadow(
+                            color: Color.black.opacity(self.isPillSize ? 0.32 : 0),
+                            radius: self.isPillSize ? PillShadowMetrics.radius : 0,
+                            x: 0,
+                            y: self.isPillSize ? PillShadowMetrics.yOffset : 0
                         )
+
+                    if self.isPillSize {
+                        // Glossy border: a bright highlight that slowly rotates around the edge.
+                        // Paused under reduce-motion to avoid continuous redraws on low-resource Macs.
+                        if self.reduceMotion {
+                            RoundedRectangle(cornerRadius: self.layout.cornerRadius)
+                                .strokeBorder(
+                                    AngularGradient(
+                                        gradient: Gradient(stops: [
+                                            .init(color: .white.opacity(0.06), location: 0.00),
+                                            .init(color: .white.opacity(0.55), location: 0.13),
+                                            .init(color: .white.opacity(0.10), location: 0.30),
+                                            .init(color: .white.opacity(0.03), location: 0.55),
+                                            .init(color: .white.opacity(0.22), location: 0.80),
+                                            .init(color: .white.opacity(0.06), location: 1.00),
+                                        ]),
+                                        center: .center,
+                                        angle: .degrees(0)
+                                    ),
+                                    lineWidth: 1.2
+                                )
+                        } else {
+                            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+                                let seconds = timeline.date.timeIntervalSinceReferenceDate
+                                let angle = (seconds.truncatingRemainder(dividingBy: 6.0) / 6.0) * 360.0
+                                RoundedRectangle(cornerRadius: self.layout.cornerRadius)
+                                    .strokeBorder(
+                                        AngularGradient(
+                                            gradient: Gradient(stops: [
+                                                .init(color: .white.opacity(0.06), location: 0.00),
+                                                .init(color: .white.opacity(0.55), location: 0.13),
+                                                .init(color: .white.opacity(0.10), location: 0.30),
+                                                .init(color: .white.opacity(0.03), location: 0.55),
+                                                .init(color: .white.opacity(0.22), location: 0.80),
+                                                .init(color: .white.opacity(0.06), location: 1.00),
+                                            ]),
+                                            center: .center,
+                                            angle: .degrees(angle)
+                                        ),
+                                        lineWidth: 1.2
+                                    )
+                            }
+                        }
+                    } else {
+                        // Inner border
+                        RoundedRectangle(cornerRadius: self.layout.cornerRadius)
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [
+                                        Color.white.opacity(self.overlayBorderTopOpacity),
+                                        Color.white.opacity(self.overlayBorderBottomOpacity),
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                ),
+                                lineWidth: self.overlayBorderLineWidth
+                            )
+                    }
                 }
             )
             .frame(maxWidth: .infinity, alignment: .top)
@@ -2695,6 +2882,8 @@ struct BottomOverlayView: View {
             height: self.overlayFrameHeight,
             alignment: .top
         )
+        // Reserve space around the pill so its drop shadow isn't clipped by the (content-sized) window.
+        .padding(self.isPillSize ? 26 : 0)
         .frame(maxHeight: .infinity, alignment: .top)
         .scaleEffect(self.overlayAnimatedScale, anchor: .center)
         .offset(y: self.overlayAnimatedOffsetY)
@@ -2748,6 +2937,10 @@ struct BottomOverlayView: View {
             if !self.layout.usesFixedCanvas {
                 self.refreshDynamicPreviewSizeIfNeeded(for: self.currentPreviewSizingText)
             }
+        }
+        .onChange(of: self.contentState.isAIProcessingFailureVisible) { _, _ in
+            guard !self.layout.usesFixedCanvas else { return }
+            self.refreshDynamicPreviewSizeIfNeeded(for: self.currentPreviewSizingText)
         }
         .onChange(of: self.processingStatusVisible) { _, _ in
             guard !self.layout.usesFixedCanvas else { return }
@@ -2855,7 +3048,7 @@ struct BottomWaveformView: View {
 
     private var barFillColor: Color {
         if self.isPillStyle {
-            return Color.white.opacity(self.isProcessingVisualActive ? 0.28 : 0.62)
+            return Color.white.opacity(self.isProcessingVisualActive ? 0.32 : 0.88)
         }
         return self.color.opacity(self.isProcessingVisualActive ? 0.16 : 1.0)
     }
@@ -2977,7 +3170,8 @@ struct BottomWaveformView: View {
         let normalizedLevel = min(max(level, 0), 1)
         let denominator = max(1.0 - self.noiseThreshold, 0.001)
         let adjustedLevel = max(min((normalizedLevel - self.noiseThreshold) / denominator, 1.0), 0.0)
-        let amplifiedLevel = pow(adjustedLevel, 0.7)
+        // Lower exponent => normal speech pushes the bars higher (taller "waves" while talking).
+        let amplifiedLevel = pow(adjustedLevel, 0.55)
 
         withAnimation(.easeOut(duration: 0.08)) {
             for i in 0..<self.barCount {

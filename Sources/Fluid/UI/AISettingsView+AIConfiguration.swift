@@ -51,50 +51,18 @@ extension AIEnhancementSettingsView {
             ThemedCard(style: .prominent, hoverEffect: false) {
                 VStack(alignment: .leading, spacing: 16) {
                     self.aiSetupHeader
-                    self.aiSetupSummaryBar
+                    self.aiConfigurationSectionPicker
 
-                    HStack(spacing: 12) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Providers")
-                                .font(.system(size: 14, weight: .semibold))
-                            Text("Configure your AI provider")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                    Group {
+                        switch self.selectedConfigurationSection {
+                        case .providers:
+                            self.providerConfigurationContent
+                        case .advancedPrompts:
+                            self.promptsStepContent
                         }
-
-                        Spacer()
-
-                        Button(action: { self.viewModel.showHelp.toggle() }) {
-                            HStack(spacing: 5) {
-                                Image(systemName: self.viewModel.showHelp ? "questionmark.circle.fill" : "questionmark.circle")
-                                    .font(.system(size: 14))
-                                Text("Help")
-                                    .font(.caption)
-                                    .fontWeight(.medium)
-                            }
-                            .foregroundStyle(self.viewModel.showHelp ? self.theme.palette.accent : .secondary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(
-                                Capsule()
-                                    .fill(self.viewModel.showHelp ? self.theme.palette.accent.opacity(0.12) : self.theme.palette.cardBackground.opacity(0.8))
-                                    .overlay(
-                                        Capsule()
-                                            .stroke(self.viewModel.showHelp ? self.theme.palette.accent.opacity(0.3) : self.theme.palette.cardBorder.opacity(0.4), lineWidth: 1)
-                                    )
-                            )
-                        }
-                        .buttonStyle(.plain)
                     }
-
-                    if self.viewModel.showHelp { self.helpSectionView }
-
-                    self.providerStepContent
-
-                    Divider()
-                        .background(self.theme.palette.separator.opacity(0.5))
-
-                    self.promptsStepContent
+                    .transition(.opacity)
+                    .animation(.easeOut(duration: 0.12), value: self.selectedConfigurationSection)
                 }
                 .padding(16)
             }
@@ -130,12 +98,113 @@ extension AIEnhancementSettingsView {
                     .font(.title3)
                     .fontWeight(.semibold)
                     .foregroundStyle(self.theme.palette.primaryText)
-                Text("Choose the model used for AI Enhancement.")
+                Text("Set up providers and prompt behavior separately.")
                     .font(.caption)
                     .foregroundStyle(self.theme.palette.secondaryText)
             }
 
             Spacer()
+        }
+    }
+
+    private var aiConfigurationSectionPicker: some View {
+        HStack(spacing: 3) {
+            ForEach(AIEnhancementConfigurationSection.allCases) { section in
+                self.aiConfigurationSectionButton(section)
+            }
+        }
+        .padding(4)
+        .background(
+            Capsule(style: .continuous)
+                .fill(self.theme.palette.contentBackground.opacity(0.78))
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(self.theme.palette.cardBorder.opacity(0.24), lineWidth: 1)
+                )
+        )
+        .frame(maxWidth: .infinity, alignment: .center)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func aiConfigurationSectionButton(_ section: AIEnhancementConfigurationSection) -> some View {
+        let isSelected = self.selectedConfigurationSection == section
+        let isHovering = self.hoveredConfigurationSection == section
+        let tone = self.theme.palette.accent
+        let shape = Capsule(style: .continuous)
+
+        return Button {
+            self.selectedConfigurationSection = section
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: section.systemImage)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(section.title)
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .foregroundStyle(isSelected ? tone : (isHovering ? self.theme.palette.primaryText : self.theme.palette.secondaryText))
+            .frame(width: 176, height: 36)
+            .contentShape(shape)
+            .background(
+                shape
+                    .fill(isSelected ? tone.opacity(0.13) : (isHovering ? self.theme.palette.cardBackground.opacity(0.66) : .clear))
+                    .overlay(
+                        shape
+                            .stroke(isSelected ? tone.opacity(0.46) : (isHovering ? self.theme.palette.cardBorder.opacity(0.36) : .clear), lineWidth: 1)
+                    )
+                    .shadow(color: isSelected ? tone.opacity(0.18) : .clear, radius: 8, x: 0, y: 2)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(section.title)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .onHover { hovering in
+            self.hoveredConfigurationSection = hovering ? section : nil
+        }
+        .animation(.easeOut(duration: 0.12), value: isHovering)
+        .animation(.easeOut(duration: 0.12), value: isSelected)
+    }
+
+    private var providerConfigurationContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            self.aiSetupSummaryBar
+
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Providers")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("Configure local models and API providers.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button(action: { self.viewModel.showHelp.toggle() }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: self.viewModel.showHelp ? "questionmark.circle.fill" : "questionmark.circle")
+                            .font(.system(size: 14))
+                        Text("Help")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                    }
+                    .foregroundStyle(self.viewModel.showHelp ? self.theme.palette.accent : .secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(self.viewModel.showHelp ? self.theme.palette.accent.opacity(0.12) : self.theme.palette.cardBackground.opacity(0.8))
+                            .overlay(
+                                Capsule()
+                                    .stroke(self.viewModel.showHelp ? self.theme.palette.accent.opacity(0.3) : self.theme.palette.cardBorder.opacity(0.4), lineWidth: 1)
+                            )
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+
+            if self.viewModel.showHelp { self.helpSectionView }
+
+            self.providerStepContent
         }
     }
 
@@ -146,13 +215,13 @@ extension AIEnhancementSettingsView {
                 self.aiSetupSummaryDivider
                 self.aiSetupSummaryItem(icon: "cloud", text: "Cloud models use provider APIs")
                 self.aiSetupSummaryDivider
-                self.aiSetupSummaryItem(icon: "slider.horizontal.3", text: "AI Enhancement enables dictation prompts")
+                self.aiSetupSummaryItem(icon: "keyboard", text: "Shortcuts choose when prompts run")
             }
 
             VStack(alignment: .leading, spacing: 7) {
                 self.aiSetupSummaryItem(icon: "cpu", text: "Local models run on Mac")
                 self.aiSetupSummaryItem(icon: "cloud", text: "Cloud models use provider APIs")
-                self.aiSetupSummaryItem(icon: "slider.horizontal.3", text: "AI Enhancement enables dictation prompts")
+                self.aiSetupSummaryItem(icon: "keyboard", text: "Shortcuts choose when prompts run")
             }
         }
         .padding(.horizontal, 2)
@@ -319,7 +388,7 @@ extension AIEnhancementSettingsView {
                     }
                     .padding(4)
                 }
-                .onChange(of: self.expandedProviderID) { newID in
+                .onChange(of: self.expandedProviderID) { _, newID in
                     if let id = newID {
                         withAnimation(.easeInOut(duration: 0.3)) {
                             proxy.scrollTo(id, anchor: .top)
@@ -395,6 +464,11 @@ extension AIEnhancementSettingsView {
         let isBuiltIn: Bool
     }
 
+    private struct PrivateAIProviderModelStatus {
+        let detail: String
+        let color: Color
+    }
+
     // Use cached provider items from ViewModel for scroll performance
     private var verifiedProviderItems: [ProviderItem] {
         self.viewModel.cachedVerifiedProviderItems.map {
@@ -408,15 +482,60 @@ extension AIEnhancementSettingsView {
         }
     }
 
+    /// Shared companion button for provider picker rows — identical size/style everywhere.
+    /// Uses a fixed square frame so icon-only buttons don't get horizontal padding from CompactButtonStyle.
+    @ViewBuilder
+    func companionIconButton(
+        systemName: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: AISettingsLayout.providerRowControlHeight, height: AISettingsLayout.providerRowControlHeight)
+        }
+        .buttonStyle(SquareIconButtonStyle())
+        .help(help)
+    }
+
+    /// Shared companion button with loading state — for refresh buttons.
+    @ViewBuilder
+    func companionIconButton(
+        isRefreshing: Bool,
+        disabled: Bool = false,
+        opacity: Double = 1,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            ZStack {
+                if isRefreshing {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                        .frame(width: 16, height: 16)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+            }
+            .frame(width: AISettingsLayout.providerRowControlHeight, height: AISettingsLayout.providerRowControlHeight)
+        }
+        .buttonStyle(SquareIconButtonStyle())
+        .disabled(disabled)
+        .opacity(opacity)
+        .help(help)
+    }
+
     private func providerCard(_ item: ProviderItem) -> some View {
         let isAppleDisabled = item.id == "apple-intelligence-disabled"
-        let isFluidInterest = item.id == "fluid-1"
+        let isPrivateAIProvider = item.id == PrivateAIProviderFeature.shared.providerID
         let isComingSoon = isAppleDisabled
         let isExpanded = self.expandedProviderID == item.id && !isAppleDisabled
         let status = self.providerStatus(for: item)
         let borderColor = isExpanded
             ? self.theme.palette.accent.opacity(0.5)
-            : (isFluidInterest ? self.theme.palette.accent.opacity(0.3) : self.theme.palette.cardBorder.opacity(0.3))
+            : self.theme.palette.cardBorder.opacity(0.3)
         let statusView = HStack(spacing: 5) {
             if !status.icon.isEmpty {
                 Image(systemName: status.icon)
@@ -438,21 +557,7 @@ extension AIEnhancementSettingsView {
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(isComingSoon ? self.theme.palette.accent : self.theme.palette.primaryText)
 
-                        if isFluidInterest {
-                            statusView
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(
-                                    Capsule()
-                                        .fill(self.theme.palette.accent.opacity(0.12))
-                                        .overlay(
-                                            Capsule()
-                                                .stroke(self.theme.palette.accent.opacity(0.3), lineWidth: 1)
-                                        )
-                                )
-                        } else {
-                            statusView
-                        }
+                        statusView
                     }
 
                     Spacer()
@@ -485,8 +590,8 @@ extension AIEnhancementSettingsView {
                     .background(self.theme.palette.separator.opacity(0.5))
                     .padding(.horizontal, 14)
 
-                if isFluidInterest {
-                    self.fluid1InterestSection
+                if isPrivateAIProvider {
+                    self.privateAIRuntimeSection
                         .padding(14)
                         .padding(.top, 4)
                 } else {
@@ -509,13 +614,6 @@ extension AIEnhancementSettingsView {
     }
 
     private func providerStatus(for item: ProviderItem) -> (text: String, color: Color, icon: String) {
-        if item.id == "fluid-1" {
-            let hasInterest = self.settings.fluid1InterestCaptured
-            if hasInterest {
-                return ("Thanks · Coming soon", self.theme.palette.accent, "checkmark.circle.fill")
-            }
-            return ("Early access · Tap to join", self.theme.palette.accent, "hand.tap")
-        }
         if item.id == "apple-intelligence-disabled" {
             return ("Unavailable", .secondary, "lock.slash")
         }
@@ -539,15 +637,6 @@ extension AIEnhancementSettingsView {
     }
 
     private func toggleProviderExpansion(_ providerID: String) {
-        if providerID == "fluid-1" {
-            if self.expandedProviderID == providerID {
-                self.expandedProviderID = nil
-            } else {
-                self.expandedProviderID = providerID
-                self.fluid1InterestErrorMessage = ""
-            }
-            return
-        }
         if self.expandedProviderID == providerID {
             self.expandedProviderID = nil
             self.viewModel.clearEditProviderDraft()
@@ -558,175 +647,469 @@ extension AIEnhancementSettingsView {
         }
     }
 
-    private var fluid1InterestSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            let hasInterest = self.settings.fluid1InterestCaptured
-            if hasInterest {
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .font(.system(size: 13))
-                        .foregroundStyle(self.theme.palette.accent)
-                    Text("Thank you — coming soon")
-                        .font(.system(size: 13, weight: .semibold))
-                }
+    private var privateAIRuntimeSection: some View {
+        let model = self.selectedPrivateAIModel
+        let status = self.privateAIModelStatus(for: model)
+        let isInstalled = PrivateAIIntegrationService.isModelInstalled(model)
+        let isDownloading = self.privateAILoadState.isDownloading(model.id)
+        let downloadProgress = self.privateAILoadState.downloadProgress(for: model.id)
+        let isLoading = self.privateAILoadState.isLoading(model.id)
+        let isLoaded = self.privateAILoadState.isLoaded(model.id)
+        let hasLoadFailure = self.privateAILoadState.failureMessage(for: model.id) != nil
+        let isVerified = self.isPrivateAIModelVerified(model)
+        let isTesting = self.viewModel.isTestingConnection && self.viewModel.selectedProviderID == PrivateAIProviderFeature.shared.providerID
+        let isBusy = isDownloading || isLoading || isTesting
+        let canVerify = isInstalled && (!isVerified || hasLoadFailure) && !self.privateAISelectedModelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
-                Text("We saved your interest in Fluid-1, our private on-device model. We'll notify you when it's ready.")
-                    .font(.caption)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("Model")
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
-            } else {
-                HStack(spacing: 8) {
-                    Image(systemName: "envelope.fill")
-                        .font(.system(size: 13))
-                        .foregroundStyle(self.theme.palette.accent)
-                    Text("Join Fluid-1 early access")
-                        .font(.system(size: 13, weight: .semibold))
-                }
+                    .frame(width: 50, alignment: .leading)
 
-                Text("Share your email to get notified when our private on-device model is ready.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                SearchableModelPicker(
+                    models: PrivateAIModelRegistry.modelIDs(),
+                    selectedModel: self.privateAIModelBinding,
+                    selectionEnabled: !isBusy,
+                    controlWidth: 180,
+                    controlHeight: AISettingsLayout.providerRowControlHeight
+                )
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Email")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    TextField("you@example.com", text: self.$fluid1InterestEmail)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 13))
-                        .onChange(of: self.fluid1InterestEmail) { _, _ in
-                            if !self.fluid1InterestErrorMessage.isEmpty {
-                                self.fluid1InterestErrorMessage = ""
-                            }
-                        }
-                }
-
-                HStack(spacing: 10) {
-                    Button(action: { self.submitFluid1Interest() }) {
-                        HStack(spacing: 6) {
-                            if self.fluid1InterestIsSubmitting {
-                                ProgressView()
-                                    .controlSize(.small)
-                                    .fixedSize()
-                            } else {
-                                Image(systemName: "paperplane.fill")
-                                    .font(.system(size: 11))
-                            }
-                            Text("Join early access")
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                    }
-                    .buttonStyle(GlassButtonStyle(height: AISettingsLayout.controlHeight))
-                    .disabled(self.fluid1InterestIsSubmitting)
-                }
-
-                if !self.fluid1InterestErrorMessage.isEmpty {
-                    Text(self.fluid1InterestErrorMessage)
-                        .font(.caption)
-                        .foregroundStyle(.red)
+                self.companionIconButton(systemName: "folder", help: "Open downloaded model folder") {
+                    self.revealPrivateAIModelFolder()
                 }
             }
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(self.theme.palette.accent.opacity(0.08))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(self.theme.palette.accent.opacity(0.25), lineWidth: 1)
+
+            if isDownloading || isLoading || isLoaded || hasLoadFailure || isVerified || !isInstalled {
+                self.privateAIModelStatusRow(
+                    status: status,
+                    progress: downloadProgress,
+                    isDownloading: isDownloading,
+                    showsLoadingIndicator: isLoading
                 )
+            }
+
+            self.privateAIPrefixCacheRow(isBusy: isBusy)
+
+            if self.viewModel.connectionStatus(for: PrivateAIProviderFeature.shared.providerID) == .failed,
+               !self.viewModel.connectionErrorMessage.isEmpty
+            {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                    Text(self.viewModel.connectionErrorMessage)
+                        .font(.caption)
+                }
+                .foregroundStyle(.red)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.red.opacity(0.1))
+                )
+            }
+
+            if !isInstalled {
+                if model.canDownload {
+                    Button(action: { self.downloadPrivateAIModel(model) }) {
+                        HStack(spacing: 6) {
+                            if isDownloading {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .fixedSize()
+                            }
+                            Text(isDownloading ? Self.downloadButtonText(progress: downloadProgress) : "Download & Verify")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                    }
+                    .fluidButton(.accent, size: .small)
+                    .disabled(isBusy)
+                } else {
+                    HStack(spacing: 6) {
+                        Image(systemName: "info.circle")
+                            .font(.caption)
+                        Text("Install the selected model to enable verification")
+                            .font(.caption)
+                    }
+                    .foregroundStyle(.secondary)
+                }
+            } else if canVerify {
+                Button(action: { self.verifyPrivateAIConnection(model) }) {
+                    HStack(spacing: 6) {
+                        if isTesting {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .fixedSize()
+                        }
+                        Text(isTesting ? "Loading..." : "Verify")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                }
+                .fluidButton(.accent, size: .small)
+                .disabled(isBusy)
+            }
+        }
+    }
+
+    private func privateAIPrefixCacheRow(isBusy: Bool) -> some View {
+        HStack(spacing: 8) {
+            Toggle("Fast startup", isOn: self.privateAIPrefixCacheBinding)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .font(.caption)
+                .disabled(isBusy)
+                .help("Keeps a reusable local prompt cache for faster first dictation.")
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func privateAIModelStatusRow(
+        status: PrivateAIProviderModelStatus,
+        progress: PrivateAIModelDownloadProgress?,
+        isDownloading: Bool,
+        showsLoadingIndicator: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                if showsLoadingIndicator, !isDownloading {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .fixedSize()
+                }
+
+                Text(status.detail)
+                    .font(.caption)
+                    .lineLimit(2)
+            }
+
+            if isDownloading {
+                self.privateAIDownloadProgressBar(progress: progress, color: status.color)
+
+                Text(Self.downloadProgressText(progress))
+                    .font(.caption2)
+                    .lineLimit(1)
+            }
+        }
+        .foregroundStyle(status.color)
+    }
+
+    @ViewBuilder
+    private func privateAIDownloadProgressBar(
+        progress: PrivateAIModelDownloadProgress?,
+        color: Color
+    ) -> some View {
+        if let fractionCompleted = progress?.fractionCompleted {
+            ProgressView(value: fractionCompleted)
+                .controlSize(.mini)
+                .frame(maxWidth: 260)
+                .tint(color)
+        } else {
+            ProgressView()
+                .progressViewStyle(.linear)
+                .controlSize(.mini)
+                .frame(maxWidth: 260)
+                .tint(color)
+        }
+    }
+
+    private var privateAIPrefixCacheBinding: Binding<Bool> {
+        Binding(
+            get: { self.settings.privateAIPrefixKVCacheEnabled },
+            set: { enabled in
+                guard self.settings.privateAIPrefixKVCacheEnabled != enabled else { return }
+                self.settings.privateAIPrefixKVCacheEnabled = enabled
+                self.privateAILoadState = .idle
+                Task { @MainActor in
+                    await PrivateAIIntegrationService.shared.unloadCachedRuntime(
+                        reason: enabled ? "prefix cache enabled" : "prefix cache disabled"
+                    )
+                    self.viewModel.refreshProviderItems()
+                }
+            }
         )
     }
 
-    private func submitFluid1Interest() {
-        guard !self.settings.fluid1InterestCaptured else { return }
-        let email = self.fluid1InterestEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !email.isEmpty else {
-            self.fluid1InterestErrorMessage = "Enter your email to join early access."
-            return
-        }
-        guard self.isValidEmail(email) else {
-            self.fluid1InterestErrorMessage = "Enter a valid email address."
-            return
-        }
-        self.fluid1InterestErrorMessage = ""
-        self.fluid1InterestIsSubmitting = true
+    private var privateAIModelBinding: Binding<String> {
+        Binding(
+            get: { self.privateAISelectedModelID },
+            set: { self.persistPrivateAIModelSelection($0) }
+        )
+    }
 
-        Task {
-            let success = await self.sendFluid1Interest(email: email)
-            await MainActor.run {
-                self.fluid1InterestIsSubmitting = false
-                if success {
-                    self.settings.fluid1InterestCaptured = true
-                    self.fluid1InterestEmail = ""
-                } else {
-                    self.fluid1InterestErrorMessage = "We couldn't save your interest. Please try again."
+    private func refreshPrivateAIProviderModels() {
+        let providerKey = self.viewModel.providerKey(for: PrivateAIProviderFeature.shared.providerID)
+        let models = PrivateAIModelRegistry.modelIDs()
+        let selected = PrivateAIModelRegistry.canonicalModelID(for: self.privateAISelectedModelID) ?? PrivateAIModelRegistry.defaultModel.id
+
+        self.privateAISelectedModelID = selected
+        self.viewModel.availableModelsByProvider[providerKey] = models
+        self.viewModel.selectedModelByProvider[providerKey] = selected
+        self.viewModel.settings.availableModelsByProvider = self.viewModel.availableModelsByProvider
+        self.viewModel.settings.selectedModelByProvider = self.viewModel.selectedModelByProvider
+
+        if self.viewModel.selectedProviderID == PrivateAIProviderFeature.shared.providerID {
+            self.viewModel.availableModels = models
+            self.viewModel.selectedModel = selected
+        }
+
+        self.refreshPrivateAILoadState()
+        self.viewModel.refreshProviderItems()
+    }
+
+    private func downloadPrivateAIModel(_ model: PrivateAIRegisteredModel) {
+        guard model.canDownload else {
+            self.privateAILoadState = .failed(modelID: model.id, message: "Download URL is not configured yet.")
+            return
+        }
+
+        guard !self.privateAILoadState.isDownloading(model.id) else { return }
+
+        self.privateAILoadState = .downloading(
+            modelID: model.id,
+            progress: PrivateAIModelDownloadProgress(initialExpectedBytes: model.artifact.byteCount)
+        )
+        Task { @MainActor in
+            do {
+                DebugLogger.shared.info(
+                    "Private provider download button pressed model=\(model.id)",
+                    source: "AISettingsView"
+                )
+                _ = try await PrivateAIIntegrationService.prepareModel(model) { progress in
+                    await MainActor.run {
+                        guard self.privateAISelectedModelID == model.id else { return }
+                        self.privateAILoadState = .downloading(
+                            modelID: model.id,
+                            progress: progress.withFallbackExpectedBytes(model.artifact.byteCount)
+                        )
+                    }
                 }
+                guard self.privateAISelectedModelID == model.id else { return }
+                self.privateAILoadState = .loading(modelID: model.id)
+                let start = ContinuousClock.now
+                let verified = await self.viewModel.verifyPrivateAIProvider(model: model)
+                let latencyMilliseconds = Self.elapsedMilliseconds(since: start)
+                guard self.privateAISelectedModelID == model.id else { return }
+                if verified {
+                    self.privateAILoadState = .loaded(modelID: model.id, latencyMilliseconds: latencyMilliseconds)
+                } else {
+                    let message = self.viewModel.connectionErrorMessage.isEmpty
+                        ? "Model downloaded, but verification failed."
+                        : self.viewModel.connectionErrorMessage
+                    self.privateAILoadState = .failed(modelID: model.id, message: message)
+                }
+            } catch {
+                guard self.privateAISelectedModelID == model.id else { return }
+                self.privateAILoadState = .failed(
+                    modelID: model.id,
+                    message: Self.errorMessage(for: error)
+                )
             }
+            self.viewModel.refreshProviderItems()
         }
     }
 
-    private func sendFluid1Interest(email: String) async -> Bool {
-        guard let url = URL(string: "https://altic.dev/api/fluid/fluid-model-interest") else {
-            DebugLogger.shared.error("Invalid Fluid-1 interest API URL", source: "AISettingsView")
-            return false
+    private func verifyPrivateAIConnection(_ model: PrivateAIRegisteredModel) {
+        self.privateAILoadState = .loading(modelID: model.id)
+        Task { @MainActor in
+            let start = ContinuousClock.now
+            let verified = await self.viewModel.verifyPrivateAIProvider(model: model)
+            let latencyMilliseconds = Self.elapsedMilliseconds(since: start)
+            guard self.privateAISelectedModelID == model.id else { return }
+            if verified {
+                self.privateAILoadState = .loaded(modelID: model.id, latencyMilliseconds: latencyMilliseconds)
+            } else {
+                let message = self.viewModel.connectionErrorMessage.isEmpty
+                    ? "Model verification failed."
+                    : self.viewModel.connectionErrorMessage
+                self.privateAILoadState = .failed(modelID: model.id, message: message)
+            }
+            self.viewModel.refreshProviderItems()
+        }
+    }
+
+    private var selectedPrivateAIModel: PrivateAIRegisteredModel {
+        PrivateAIModelRegistry.model(id: self.privateAISelectedModelID) ?? PrivateAIModelRegistry.defaultModel
+    }
+
+    private func isPrivateAIModelVerified(_ model: PrivateAIRegisteredModel) -> Bool {
+        guard PrivateAIIntegrationService.isModelInstalled(model) else { return false }
+        let key = self.viewModel.providerKey(for: PrivateAIProviderFeature.shared.providerID)
+        return self.viewModel.settings.verifiedProviderFingerprints[key] == PrivateAIProviderFeature.verificationFingerprint(for: model.id)
+    }
+
+    private func privateAIModelStatus(
+        for model: PrivateAIRegisteredModel
+    ) -> PrivateAIProviderModelStatus {
+        if self.privateAILoadState.isDownloading(model.id) {
+            return PrivateAIProviderModelStatus(
+                detail: "Downloading model.",
+                color: self.theme.palette.accent
+            )
         }
 
-        let payload: [String: Any] = [
-            "emailId": email,
-            "modelName": "Fluid-1",
-        ]
+        if self.privateAILoadState.isLoading(model.id) {
+            return PrivateAIProviderModelStatus(
+                detail: "Loading...",
+                color: self.theme.palette.accent
+            )
+        }
 
-        guard JSONSerialization.isValidJSONObject(payload) else { return false }
+        if self.privateAILoadState.isLoaded(model.id) {
+            return PrivateAIProviderModelStatus(
+                detail: "Dictation-only model.",
+                color: Color.fluidGreen
+            )
+        }
 
+        if let message = self.privateAILoadState.failureMessage(for: model.id) {
+            return PrivateAIProviderModelStatus(
+                detail: message,
+                color: .red
+            )
+        }
+
+        if self.isPrivateAIModelVerified(model) {
+            return PrivateAIProviderModelStatus(
+                detail: "Dictation-only model.",
+                color: Color.fluidGreen
+            )
+        }
+
+        if PrivateAIIntegrationService.isModelInstalled(model) {
+            return PrivateAIProviderModelStatus(
+                detail: "Ready to verify.",
+                color: Color.fluidGreen
+            )
+        }
+
+        if PrivateAIIntegrationService.isLocalRuntimeConfigured {
+            return PrivateAIProviderModelStatus(
+                detail: "Local model configured.",
+                color: Color.fluidGreen
+            )
+        }
+
+        if model.canDownload {
+            return PrivateAIProviderModelStatus(
+                detail: "Model not downloaded.",
+                color: self.theme.palette.accent
+            )
+        }
+
+        return PrivateAIProviderModelStatus(
+            detail: "Model unavailable.",
+            color: .orange
+        )
+    }
+
+    private func revealPrivateAIModelFolder() {
+        let directoryURL = PrivateAIIntegrationService.modelDirectoryURL
         do {
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-
-            let (_, response) = try await URLSession.shared.data(for: request)
-            if let httpResponse = response as? HTTPURLResponse {
-                let success = (200...299).contains(httpResponse.statusCode)
-                if success {
-                    DebugLogger.shared.info("Fluid-1 interest submitted", source: "AISettingsView")
-                } else {
-                    DebugLogger.shared.error(
-                        "Fluid-1 interest submission failed with status: \(httpResponse.statusCode)",
-                        source: "AISettingsView"
-                    )
-                }
-                return success
-            }
-            return false
+            try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+            NSWorkspace.shared.open(directoryURL)
         } catch {
             DebugLogger.shared.error(
-                "Network error submitting Fluid-1 interest: \(error.localizedDescription)",
+                "Failed to open Private AI Provider models folder: \(error.localizedDescription)",
                 source: "AISettingsView"
             )
-            return false
         }
     }
 
-    private func isValidEmail(_ email: String) -> Bool {
-        let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.contains("@") else { return false }
-        let parts = trimmed.split(separator: "@", omittingEmptySubsequences: false)
-        guard parts.count == 2 else { return false }
+    func refreshPrivateAILoadState() {
+        Task { @MainActor in
+            guard let loaded = await PrivateAIIntegrationService.shared.loadedModelState(),
+                  loaded.state == .ready
+            else {
+                self.privateAILoadState = .idle
+                return
+            }
 
-        let local = String(parts[0])
-        let domain = String(parts[1])
-        guard !local.isEmpty, !domain.isEmpty else { return false }
-        guard !local.hasPrefix("."), !local.hasSuffix(".") else { return false }
-        guard !domain.hasPrefix("."), !domain.hasSuffix(".") else { return false }
-        guard !local.contains(".."), !domain.contains("..") else { return false }
+            self.privateAILoadState = .loaded(modelID: loaded.modelID, latencyMilliseconds: nil)
+        }
+    }
 
-        let domainParts = domain.split(separator: ".", omittingEmptySubsequences: false)
-        guard domainParts.count >= 2 else { return false }
-        guard domainParts.allSatisfy({ !$0.isEmpty }) else { return false }
-        guard let tld = domainParts.last, tld.count >= 2 else { return false }
+    private func loadPrivateAIModel(_ model: PrivateAIRegisteredModel) {
+        guard PrivateAIIntegrationService.isModelInstalled(model) else {
+            self.privateAILoadState = .failed(modelID: model.id, message: "Model file is not installed.")
+            return
+        }
 
-        return true
+        self.privateAILoadState = .loading(modelID: model.id)
+        Task { @MainActor in
+            do {
+                let start = ContinuousClock.now
+                let status = try await PrivateAIIntegrationService.shared.loadModel(model)
+                let latencyMilliseconds = Self.elapsedMilliseconds(since: start)
+                guard self.privateAISelectedModelID == model.id else { return }
+                switch status.state {
+                case .ready:
+                    self.privateAILoadState = .loaded(modelID: model.id, latencyMilliseconds: latencyMilliseconds)
+                default:
+                    self.privateAILoadState = .failed(
+                        modelID: model.id,
+                        message: status.message ?? "Model did not report ready."
+                    )
+                }
+            } catch {
+                guard self.privateAISelectedModelID == model.id else { return }
+                self.privateAILoadState = .failed(
+                    modelID: model.id,
+                    message: Self.errorMessage(for: error)
+                )
+            }
+            self.viewModel.refreshProviderItems()
+        }
+    }
+
+    private static func errorMessage(for error: Error) -> String {
+        if let localizedError = error as? LocalizedError,
+           let description = localizedError.errorDescription
+        {
+            return description
+        }
+        return String(describing: error)
+    }
+
+    private static func downloadButtonText(progress: PrivateAIModelDownloadProgress?) -> String {
+        PrivateAIModelDownloadProgressText.buttonTitle(for: progress)
+    }
+
+    private static func downloadProgressText(_ progress: PrivateAIModelDownloadProgress?) -> String {
+        PrivateAIModelDownloadProgressText.detailText(for: progress)
+    }
+
+    private static func elapsedMilliseconds(since start: ContinuousClock.Instant) -> Int {
+        let elapsed = start.duration(to: ContinuousClock.now)
+        return Int(elapsed.components.seconds * 1000) + Int(elapsed.components.attoseconds / 1_000_000_000_000_000)
+    }
+
+    private func persistPrivateAIModelSelection(_ value: String) {
+        let model = PrivateAIModelRegistry.model(id: value) ?? PrivateAIModelRegistry.defaultModel
+        let providerKey = self.viewModel.providerKey(for: PrivateAIProviderFeature.shared.providerID)
+        let models = PrivateAIModelRegistry.modelIDs()
+
+        self.privateAISelectedModelID = model.id
+        UserDefaults.standard.set(model.id, forKey: PrivateAIIntegrationService.selectedModelDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: PrivateAIIntegrationService.localModelPathDefaultsKey)
+
+        self.viewModel.availableModelsByProvider[providerKey] = models
+        self.viewModel.selectedModelByProvider[providerKey] = model.id
+        self.viewModel.settings.availableModelsByProvider = self.viewModel.availableModelsByProvider
+        self.viewModel.settings.selectedModelByProvider = self.viewModel.selectedModelByProvider
+
+        if self.viewModel.selectedProviderID == PrivateAIProviderFeature.shared.providerID {
+            self.viewModel.availableModels = models
+            self.viewModel.selectedModel = model.id
+        }
+        self.viewModel.resetVerification(for: PrivateAIProviderFeature.shared.providerID)
+        self.viewModel.refreshProviderItems()
+        if PrivateAIIntegrationService.isModelInstalled(model) {
+            self.loadPrivateAIModel(model)
+        } else {
+            self.privateAILoadState = .idle
+        }
     }
 
     private func providerDetailsSection(for item: ProviderItem) -> AnyView {
@@ -819,7 +1202,7 @@ extension AIEnhancementSettingsView {
                     Button("Verify") {
                         self.viewModel.verifyAppleIntelligence()
                     }
-                    .buttonStyle(GlassButtonStyle(height: AISettingsLayout.controlHeight))
+                    .fluidButton(.glass, size: .compact)
                 }
             } else {
                 if isCustom {
@@ -887,7 +1270,7 @@ extension AIEnhancementSettingsView {
                     }
                 }
 
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     Text("Model")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
@@ -896,16 +1279,25 @@ extension AIEnhancementSettingsView {
                     SearchableModelPicker(
                         models: models,
                         selectedModel: self.modelBinding(for: item.id),
-                        onRefresh: {
-                            Task { await self.viewModel.fetchModelsForCurrentProvider() }
-                        },
-                        isRefreshing: isRefreshing,
-                        refreshEnabled: canFetchModels,
                         selectionEnabled: hasModels,
                         controlWidth: 180,
-                        controlHeight: 30
+                        controlHeight: AISettingsLayout.providerRowControlHeight
                     )
 
+                    self.companionIconButton(
+                        isRefreshing: isRefreshing,
+                        disabled: isRefreshing || !canFetchModels,
+                        opacity: canFetchModels ? 1 : 0.45,
+                        help: "Refresh model list"
+                    ) {
+                        self.activateProvider(item.id)
+                        Task { await self.viewModel.fetchModelsForCurrentProvider() }
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    Color.clear
+                        .frame(width: 50, alignment: .leading)
                     self.reasoningButton(for: item.id)
                 }
 
@@ -952,7 +1344,7 @@ extension AIEnhancementSettingsView {
                                 .font(.system(size: 13, weight: .semibold))
                         }
                     }
-                    .buttonStyle(AccentButtonStyle(compact: true))
+                    .fluidButton(.accent, size: .small)
                     .disabled(self.viewModel.isTestingConnection)
                 } else {
                     HStack(spacing: 6) {
@@ -978,7 +1370,7 @@ extension AIEnhancementSettingsView {
                         }
                         .font(.caption)
                     }
-                    .buttonStyle(CompactButtonStyle(foreground: .red, borderColor: .red.opacity(0.6)))
+                    .fluidCompactButton(foreground: .red, borderColor: .red.opacity(0.6))
                 }
             }
         })
@@ -1076,6 +1468,18 @@ extension AIEnhancementSettingsView {
         let providerKey = self.viewModel.providerKey(for: item.id)
         let models = self.viewModel.availableModelsByProvider[providerKey] ?? []
         let isSelected = item.id == self.viewModel.selectedProviderID
+        let isPrivateAIProvider = item.id == PrivateAIProviderFeature.shared.providerID
+        let fluidModel = self.selectedPrivateAIModel
+        let fluidStatus = self.privateAIModelStatus(for: fluidModel)
+        let isFluidInstalled = PrivateAIIntegrationService.isModelInstalled(fluidModel)
+        let isFluidDownloading = self.privateAILoadState.isDownloading(fluidModel.id)
+        let fluidDownloadProgress = self.privateAILoadState.downloadProgress(for: fluidModel.id)
+        let isFluidLoading = self.privateAILoadState.isLoading(fluidModel.id)
+        let isFluidLoaded = self.privateAILoadState.isLoaded(fluidModel.id)
+        let hasFluidLoadFailure = self.privateAILoadState.failureMessage(for: fluidModel.id) != nil
+        let isFluidVerified = self.isPrivateAIModelVerified(fluidModel)
+        let isFluidTesting = self.viewModel.isTestingConnection && self.viewModel.selectedProviderID == PrivateAIProviderFeature.shared.providerID
+        let isFluidBusy = isFluidDownloading || isFluidLoading || isFluidTesting
         let isRefreshing = self.viewModel.isFetchingModels && self.viewModel.selectedProviderID == item.id
         let baseURL = self.providerBaseURL(for: item).trimmingCharacters(in: .whitespacesAndNewlines)
         let isLocal = self.viewModel.isLocalEndpoint(baseURL)
@@ -1084,6 +1488,8 @@ extension AIEnhancementSettingsView {
         let canFetchModels = isLocal ? !baseURL.isEmpty : (hasAPIKey && !baseURL.isEmpty)
         let hasModels = !models.isEmpty
         let isEditing = self.viewModel.showingEditProvider && self.viewModel.selectedProviderID == item.id
+        let iconColumnWidth = AISettingsLayout.providerRowControlHeight
+        let actionColumnWidth: CGFloat = 76
 
         return VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center, spacing: 12) {
@@ -1112,36 +1518,119 @@ extension AIEnhancementSettingsView {
 
                 Spacer()
 
-                SearchableModelPicker(
-                    models: models,
-                    selectedModel: self.modelBinding(for: item.id),
-                    onRefresh: {
-                        self.activateProvider(item.id)
-                        await self.viewModel.fetchModelsForCurrentProvider()
-                    },
-                    isRefreshing: isRefreshing,
-                    refreshEnabled: canFetchModels,
-                    selectionEnabled: hasModels,
-                    controlWidth: 180,
-                    controlHeight: 28
-                )
+                // Fixed action grid: companion icon, optional reasoning, primary action.
+                HStack(spacing: 8) {
+                    if isPrivateAIProvider {
+                        SearchableModelPicker(
+                            models: PrivateAIModelRegistry.modelIDs(),
+                            selectedModel: self.privateAIModelBinding,
+                            selectionEnabled: !isFluidBusy,
+                            controlWidth: 180,
+                            controlHeight: AISettingsLayout.providerRowControlHeight
+                        )
 
-                self.reasoningButton(for: item.id)
+                        self.companionIconButton(systemName: "folder", help: "Open downloaded model folder") {
+                            self.revealPrivateAIModelFolder()
+                        }
+                        .frame(width: iconColumnWidth, height: AISettingsLayout.providerRowControlHeight)
 
-                Button("Edit") {
-                    self.activateProvider(item.id)
-                    if isEditing {
-                        self.viewModel.clearEditProviderDraft()
-                        self.viewModel.setEditingAPIKey(false, for: item.id)
+                        Color.clear
+                            .frame(width: iconColumnWidth, height: AISettingsLayout.providerRowControlHeight)
+
+                        ZStack {
+                            if isFluidDownloading || !isFluidInstalled {
+                                Button(action: { self.downloadPrivateAIModel(fluidModel) }) {
+                                    HStack(spacing: 4) {
+                                        if isFluidDownloading {
+                                            ProgressView()
+                                                .controlSize(.mini)
+                                                .fixedSize()
+                                        }
+                                        Text(isFluidDownloading ? Self.downloadButtonText(progress: fluidDownloadProgress) : "Download")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .lineLimit(1)
+                                    }
+                                }
+                                .fluidButton(.accent, size: .small)
+                                .frame(width: actionColumnWidth, height: AISettingsLayout.providerRowControlHeight)
+                                .disabled(!fluidModel.canDownload || isFluidBusy)
+                                .help(fluidModel.canDownload ? "Download and verify selected model" : "Download URL is not configured yet")
+                            } else if !isFluidVerified || hasFluidLoadFailure {
+                                Button(action: { self.verifyPrivateAIConnection(fluidModel) }) {
+                                    HStack(spacing: 4) {
+                                        if isFluidLoading || isFluidTesting {
+                                            ProgressView()
+                                                .controlSize(.mini)
+                                                .fixedSize()
+                                        }
+                                        Text((isFluidLoading || isFluidTesting) ? "Loading" : "Verify")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .lineLimit(1)
+                                    }
+                                }
+                                .fluidButton(.accent, size: .small)
+                                .frame(width: actionColumnWidth, height: AISettingsLayout.providerRowControlHeight)
+                                .disabled(isFluidBusy)
+                                .help("Verify selected model")
+                            }
+                        }
+                        .frame(width: actionColumnWidth, height: AISettingsLayout.providerRowControlHeight)
                     } else {
-                        self.viewModel.startEditingProvider()
-                        self.viewModel.setEditingAPIKey(true, for: item.id)
+                        SearchableModelPicker(
+                            models: models,
+                            selectedModel: self.modelBinding(for: item.id),
+                            selectionEnabled: hasModels,
+                            controlWidth: 180,
+                            controlHeight: AISettingsLayout.providerRowControlHeight
+                        )
+
+                        self.companionIconButton(
+                            isRefreshing: isRefreshing,
+                            disabled: isRefreshing || !canFetchModels,
+                            opacity: canFetchModels ? 1 : 0.45,
+                            help: "Refresh model list"
+                        ) {
+                            self.activateProvider(item.id)
+                            Task { await self.viewModel.fetchModelsForCurrentProvider() }
+                        }
+                        .frame(width: iconColumnWidth, height: AISettingsLayout.providerRowControlHeight)
+
+                        self.reasoningButton(for: item.id)
+                            .frame(width: iconColumnWidth, height: AISettingsLayout.providerRowControlHeight)
+
+                        Button(action: {
+                            self.activateProvider(item.id)
+                            if isEditing {
+                                self.viewModel.clearEditProviderDraft()
+                                self.viewModel.setEditingAPIKey(false, for: item.id)
+                            } else {
+                                self.viewModel.startEditingProvider()
+                                self.viewModel.setEditingAPIKey(true, for: item.id)
+                            }
+                        }) {
+                            Text("Edit")
+                                .font(.system(size: 12, weight: .semibold))
+                                .frame(width: actionColumnWidth, height: AISettingsLayout.providerRowControlHeight)
+                        }
+                        .buttonStyle(SquareIconButtonStyle())
+                        .frame(width: actionColumnWidth, height: AISettingsLayout.providerRowControlHeight)
+                        .help("Edit provider")
                     }
                 }
-                .buttonStyle(CompactButtonStyle())
+                .fixedSize(horizontal: true, vertical: false)
             }
 
-            if isEditing {
+            if isPrivateAIProvider, isFluidDownloading || isFluidLoading || isFluidLoaded || hasFluidLoadFailure || isFluidVerified || !isFluidInstalled {
+                self.privateAIModelStatusRow(
+                    status: fluidStatus,
+                    progress: fluidDownloadProgress,
+                    isDownloading: isFluidDownloading,
+                    showsLoadingIndicator: isFluidLoading || isFluidTesting
+                )
+                .padding(.top, 8)
+            }
+
+            if !isPrivateAIProvider, isEditing {
                 Divider()
                     .background(self.theme.palette.separator.opacity(0.5))
                     .padding(.vertical, 10)
@@ -1149,7 +1638,10 @@ extension AIEnhancementSettingsView {
                 self.editProviderSection
             }
 
-            if self.viewModel.showingReasoningConfig && self.viewModel.selectedProviderID == item.id {
+            if !isPrivateAIProvider,
+               self.viewModel.showingReasoningConfig,
+               self.viewModel.selectedProviderID == item.id
+            {
                 Divider()
                     .background(self.theme.palette.separator.opacity(0.5))
                     .padding(.vertical, 10)
@@ -1220,7 +1712,7 @@ extension AIEnhancementSettingsView {
         let id = item.id.lowercased()
         let name = item.name.lowercased()
 
-        if id.contains("fluid-1") || name.contains("fluid") {
+        if id.contains(PrivateAIProviderFeature.shared.providerID) || name.contains("fluid") {
             return Color(red: 0.1, green: 0.1, blue: 0.12) // Dark/black
         }
         if id.contains("anthropic") || name.contains("anthropic") {
@@ -1267,7 +1759,7 @@ extension AIEnhancementSettingsView {
         let id = item.id.lowercased()
         let name = item.name.lowercased()
 
-        if id.contains("fluid-1") || name.contains("fluid") {
+        if id.contains(PrivateAIProviderFeature.shared.providerID) || name.contains("fluid") {
             return "Provider_Fluid1"
         }
         if id.contains("openai") || name.contains("openai") {
@@ -1324,12 +1816,7 @@ extension AIEnhancementSettingsView {
                 return self.viewModel.selectedModelByProvider[key] ?? ""
             },
             set: { newValue in
-                let key = self.viewModel.providerKey(for: providerID)
-                self.viewModel.selectedModelByProvider[key] = newValue
-                self.viewModel.settings.selectedModelByProvider = self.viewModel.selectedModelByProvider
-                if providerID == self.viewModel.selectedProviderID {
-                    self.viewModel.selectedModel = newValue
-                }
+                self.viewModel.selectModel(newValue, for: providerID)
             }
         )
     }
@@ -1342,13 +1829,14 @@ extension AIEnhancementSettingsView {
             self.viewModel.openReasoningConfig()
         }) {
             Image(systemName: hasEnabledConfig ? "brain.fill" : "brain")
-                .font(.system(size: 12))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(hasEnabledConfig ? self.theme.palette.accent : self.theme.palette.primaryText)
+                .frame(width: AISettingsLayout.providerRowControlHeight, height: AISettingsLayout.providerRowControlHeight)
         }
-        .buttonStyle(CompactButtonStyle(
+        .buttonStyle(SquareIconButtonStyle(
             foreground: hasEnabledConfig ? self.theme.palette.accent : nil,
             borderColor: hasEnabledConfig ? self.theme.palette.accent.opacity(0.6) : nil
         ))
-        .frame(width: 28, height: 28)
         .help("Configure reasoning parameters")
     }
 
@@ -1358,15 +1846,27 @@ extension AIEnhancementSettingsView {
                 Image(systemName: "text.bubble.fill")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(self.theme.palette.accent)
-                HStack(alignment: .firstTextBaseline, spacing: 0) {
-                    Text("Prompts & Advanced")
-                        .font(.system(size: 14, weight: .semibold))
-                    Text(" - Choose how to process your speech — email, code, terminal, and more")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                Text("Advanced Prompts")
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Button {
+                    self.isPromptProfilesHelpPresented.toggle()
+                } label: {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(self.theme.palette.secondaryText.opacity(0.78))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Circle())
                 }
-                .lineLimit(1)
-                .truncationMode(.tail)
+                .buttonStyle(.plain)
+                .help("About prompt profiles")
+                .popover(isPresented: self.$isPromptProfilesHelpPresented, arrowEdge: .top) {
+                    self.promptProfilesHelpPopover
+                }
+
+                Spacer()
             }
 
             self.advancedSettingsCard
@@ -1488,7 +1988,7 @@ extension AIEnhancementSettingsView {
                         Text("Save")
                     }
                 }
-                .buttonStyle(GlassButtonStyle(height: AISettingsLayout.controlHeight))
+                .fluidButton(.glass, size: .compact)
                 .disabled(!isBuiltIn &&
                     (self.viewModel.editProviderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
                         self.viewModel.editProviderBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
@@ -1496,7 +1996,7 @@ extension AIEnhancementSettingsView {
                 Button("Cancel") {
                     self.viewModel.clearEditProviderDraft()
                 }
-                .buttonStyle(CompactButtonStyle())
+                .fluidButton(.compact, size: .compact)
             }
 
             HStack(spacing: 10) {
@@ -1505,7 +2005,7 @@ extension AIEnhancementSettingsView {
                         self.viewModel.resetVerification(for: self.viewModel.selectedProviderID)
                         self.viewModel.clearEditProviderDraft()
                     }
-                    .buttonStyle(CompactButtonStyle(foreground: .red, borderColor: .red.opacity(0.6)))
+                    .fluidCompactButton(foreground: .red, borderColor: .red.opacity(0.6))
                 }
 
                 if !isBuiltIn {
@@ -1520,7 +2020,7 @@ extension AIEnhancementSettingsView {
                         }
                         .font(.caption)
                     }
-                    .buttonStyle(CompactButtonStyle(foreground: .red, borderColor: .red.opacity(0.6)))
+                    .fluidCompactButton(foreground: .red, borderColor: .red.opacity(0.6))
                 }
             }
         }
@@ -1587,7 +2087,7 @@ extension AIEnhancementSettingsView {
                 Button(action: { self.viewModel.deleteSelectedModel() }) {
                     HStack(spacing: 4) { Image(systemName: "trash"); Text("Delete") }.font(.caption)
                 }
-                .buttonStyle(CompactButtonStyle(foreground: .red, borderColor: .red.opacity(0.6)))
+                .fluidCompactButton(foreground: .red, borderColor: .red.opacity(0.6))
                 .frame(minWidth: AISettingsLayout.compactActionMinWidth, minHeight: AISettingsLayout.controlHeight)
             }
 
@@ -1596,7 +2096,7 @@ extension AIEnhancementSettingsView {
                     self.viewModel.showingAddModel = true
                     self.viewModel.newModelName = ""
                 }
-                .buttonStyle(CompactButtonStyle(isReady: true))
+                .fluidCompactButton(isReady: true)
                 .frame(minWidth: AISettingsLayout.wideActionMinWidth, minHeight: AISettingsLayout.controlHeight)
             }
 
@@ -1607,10 +2107,10 @@ extension AIEnhancementSettingsView {
                 }
                 .font(.caption)
             }
-            .buttonStyle(CompactButtonStyle(
+            .fluidCompactButton(
                 foreground: self.viewModel.hasReasoningConfigForCurrentModel() ? self.theme.palette.accent : nil,
                 borderColor: self.viewModel.hasReasoningConfigForCurrentModel() ? self.theme.palette.accent.opacity(0.6) : nil
-            ))
+            )
             .frame(minWidth: AISettingsLayout.compactActionMinWidth, minHeight: AISettingsLayout.controlHeight)
         }
     }
@@ -1629,14 +2129,14 @@ extension AIEnhancementSettingsView {
                     }
                 }
             Button("Add") { self.viewModel.addNewModel() }
-                .buttonStyle(CompactButtonStyle(isReady: true))
+                .fluidCompactButton(isReady: true)
                 .frame(minWidth: AISettingsLayout.compactActionMinWidth, minHeight: AISettingsLayout.controlHeight)
                 .disabled(self.viewModel.newModelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             Button("Cancel") {
                 self.viewModel.showingAddModel = false
                 self.viewModel.newModelName = ""
             }
-            .buttonStyle(CompactButtonStyle())
+            .fluidButton(.compact, size: .compact)
             .frame(minWidth: AISettingsLayout.compactActionMinWidth, minHeight: AISettingsLayout.controlHeight)
         }
         .padding(.leading, AISettingsLayout.rowLeadingIndent)
@@ -1774,11 +2274,11 @@ extension AIEnhancementSettingsView {
                     Text("Save")
                         .font(.system(size: 12, weight: .semibold))
                 }
-                .buttonStyle(AccentButtonStyle(compact: true))
+                .fluidButton(.accent, size: .small)
                 .frame(minWidth: 60, minHeight: 26)
 
                 Button("Cancel") { self.viewModel.showingReasoningConfig = false }
-                    .buttonStyle(CompactButtonStyle())
+                    .fluidButton(.compact, size: .compact)
                     .font(.system(size: 12))
                     .frame(minWidth: 60, minHeight: 26)
             }
@@ -1810,7 +2310,7 @@ extension AIEnhancementSettingsView {
                         .font(.caption)
                         .fontWeight(.semibold)
                 }
-                .buttonStyle(CompactButtonStyle(isReady: true))
+                .fluidCompactButton(isReady: true)
                 .frame(minWidth: AISettingsLayout.primaryActionMinWidth, minHeight: AISettingsLayout.controlHeight)
                 .disabled(self.viewModel.isTestingConnection ||
                     (!self.viewModel.isLocalEndpoint(self.viewModel.openAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)) &&
@@ -1857,7 +2357,7 @@ extension AIEnhancementSettingsView {
                 Label("Add or Modify API Key", systemImage: "key.fill")
                     .labelStyle(.titleAndIcon).font(.caption)
             }
-            .buttonStyle(CompactButtonStyle(isReady: true))
+            .fluidCompactButton(isReady: true)
             .frame(minWidth: AISettingsLayout.primaryActionMinWidth, minHeight: AISettingsLayout.controlHeight)
 
             if let websiteInfo = ModelRepository.shared.providerWebsiteURL(for: self.viewModel.selectedProviderID),
@@ -1867,7 +2367,7 @@ extension AIEnhancementSettingsView {
                     Label(websiteInfo.label, systemImage: websiteInfo.label.contains("Download") ? "arrow.down.circle.fill" : (websiteInfo.label.contains("Guide") ? "book.fill" : "link"))
                         .labelStyle(.titleAndIcon).font(.caption)
                 }
-                .buttonStyle(CompactButtonStyle())
+                .fluidButton(.compact, size: .compact)
                 .frame(minWidth: AISettingsLayout.actionMinWidth, minHeight: AISettingsLayout.controlHeight)
             }
         }
@@ -1884,7 +2384,7 @@ extension AIEnhancementSettingsView {
                 }
             HStack(spacing: 12) {
                 Button("Cancel") { self.viewModel.showAPIKeyEditor = false }
-                    .buttonStyle(CompactButtonStyle())
+                    .fluidButton(.compact, size: .compact)
                     .frame(minWidth: AISettingsLayout.actionMinWidth, minHeight: AISettingsLayout.controlHeight)
                 Button("OK") {
                     let trimmedKey = self.viewModel.newProviderApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1896,7 +2396,7 @@ extension AIEnhancementSettingsView {
                     }
                     self.viewModel.showAPIKeyEditor = false
                 }
-                .buttonStyle(GlassButtonStyle(height: AISettingsLayout.controlHeight))
+                .fluidButton(.glass, size: .compact)
                 .frame(minWidth: AISettingsLayout.actionMinWidth, minHeight: AISettingsLayout.controlHeight)
                 .disabled(!self.viewModel.isLocalEndpoint(self.viewModel.openAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)) &&
                     self.viewModel.newProviderApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -1957,7 +2457,7 @@ extension AIEnhancementSettingsView {
                         Text("Save Provider")
                     }
                 }
-                .buttonStyle(GlassButtonStyle(height: AISettingsLayout.controlHeight))
+                .fluidButton(.glass, size: .compact)
                 .disabled(self.viewModel.newProviderBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                 Button("Cancel") {
@@ -1967,7 +2467,7 @@ extension AIEnhancementSettingsView {
                     self.viewModel.newProviderApiKey = ""
                     self.viewModel.newProviderModels = ""
                 }
-                .buttonStyle(CompactButtonStyle())
+                .fluidButton(.compact, size: .compact)
             }
         }
         .padding(14)

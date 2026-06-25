@@ -58,6 +58,7 @@ private actor ModelDownloadRegistry {
     }
 }
 
+// swiftlint:disable type_body_length
 /// A comprehensive speech recognition service that handles real-time audio transcription.
 ///
 /// This service manages the entire ASR (Automatic Speech Recognition) pipeline including:
@@ -279,7 +280,7 @@ final class ASRService: ObservableObject {
     }
 
     private func benchmarkLog(_ message: String) {
-        DebugLogger.shared.info("ASR_BENCH session=\(self.benchmarkSessionID) \(message)", source: "ASRBenchmark")
+        DebugLogger.shared.benchmark("ASR_BENCH", message: "session=\(self.benchmarkSessionID) \(message)", source: "ASRBenchmark")
     }
 
     private func streamingChunkErrorCategory(for error: Error) -> String {
@@ -504,6 +505,7 @@ final class ASRService: ObservableObject {
     // Thread-safe buffer to prevent "Array mutation while enumerating" and memory corruption crashes
     // during long sessions where reallocation occurs frequently.
     private let audioBuffer = ThreadSafeAudioBuffer()
+    private var lastCompletedAudioSnapshot: DictationAudioSnapshot?
 
     // Streaming transcription state (no VAD)
     private var streamingTask: Task<Void, Never>?
@@ -540,11 +542,20 @@ final class ASRService: ObservableObject {
     var audioLevelPublisher: AnyPublisher<CGFloat, Never> { self.audioLevelSubject.eraseToAnyPublisher() }
     private var lastAudioLevelSentAt: TimeInterval = 0
 
+    func consumeLastCompletedAudioSnapshot() -> DictationAudioSnapshot? {
+        let snapshot = self.lastCompletedAudioSnapshot
+        self.lastCompletedAudioSnapshot = nil
+        return snapshot
+    }
+
     private var streamingChunkDurationSeconds: Double {
-        if SettingsStore.shared.parakeetFinalizationMode == .tokenTimedChunkMerge {
+        let selectedModel = SettingsStore.shared.selectedSpeechModel
+        if selectedModel == .parakeetTDT || selectedModel == .parakeetTDTv2,
+           SettingsStore.shared.parakeetFinalizationMode == .tokenTimedChunkMerge
+        {
             return 0.4
         }
-        return SettingsStore.shared.selectedSpeechModel.streamingPreviewIntervalSeconds
+        return selectedModel.streamingPreviewIntervalSeconds
     }
 
     private var minimumStreamingPreviewSamples: Int {
@@ -919,8 +930,14 @@ final class ASRService: ObservableObject {
     /// - ASR models are not available
     /// - Transcription process fails
     /// Check debug logs for detailed error information.
-    func stop() async -> String {
+    /// - Parameter onCaptureStopped: Optional callback fired on the main actor
+    ///   after the audio engine has stopped but before the (potentially slow)
+    ///   final transcription pass. Use this for immediate stop cues that
+    ///   shouldn't wait on finalization. Only invoked when capture was actually
+    ///   running (i.e. not when `stop()` early-returns because `isRunning` is false).
+    func stop(onCaptureStopped: (@MainActor () -> Void)? = nil) async -> String {
         DebugLogger.shared.info("🛑 STOP() called - beginning shutdown sequence", source: "ASRService")
+        self.lastCompletedAudioSnapshot = nil
         let stopStartedAt = Date().timeIntervalSince1970
         self.benchmarkLog("stop_start ageMs=\(self.elapsedMilliseconds(since: self.benchmarkRecordingStartedAt)) bufferedSamples=\(self.audioBuffer.count)")
 
@@ -965,6 +982,11 @@ final class ASRService: ObservableObject {
         self.engine.stop()
         DebugLogger.shared.debug("✅ Engine stopped", source: "ASRService")
 
+        // Capture has fully ended — invoke the callback so callers can play a
+        // stop cue or release capture-dependent UI without waiting on the
+        // (potentially slow) final transcription pass.
+        await MainActor.run { onCaptureStopped?() }
+
         // Recreate the engine instance instead of calling reset() to prevent format corruption
         // VoiceInk approach: tearing down and rebuilding ensures fresh, valid audio format on restart
         DebugLogger.shared.debug("🗑️ Deallocating old engine and creating fresh instance...", source: "ASRService")
@@ -990,6 +1012,7 @@ final class ASRService: ObservableObject {
         // Thread-safe copy of recorded audio
         var pcm = self.audioBuffer.getAll()
         self.audioBuffer.clear()
+        let capturedPCM = pcm
         self.benchmarkLog("stop_audio_drained samples=\(pcm.count) audioMs=\(Int((Double(pcm.count) / 16_000.0 * 1000).rounded()))")
 
         // Drop recordings with no audio at all — nothing to transcribe.
@@ -1096,6 +1119,16 @@ final class ASRService: ObservableObject {
             self.recordWordBoostHitIfAny(transcribedText: cleanedText)
             DebugLogger.shared.debug("After post-processing: '\(cleanedText)'", source: "ASRService")
             self.benchmarkLog("stop_end result=success totalMs=\(self.elapsedMilliseconds(since: stopStartedAt)) recordingAgeMs=\(self.elapsedMilliseconds(since: self.benchmarkRecordingStartedAt)) cleanedChars=\(cleanedText.count)")
+            if SettingsStore.shared.saveTranscriptionHistory,
+               SettingsStore.shared.saveAudioWithTranscriptionHistory,
+               !capturedPCM.isEmpty
+            {
+                self.lastCompletedAudioSnapshot = DictationAudioSnapshot(
+                    samples: capturedPCM,
+                    sampleRate: 16_000,
+                    channels: 1
+                )
+            }
 
             // Resume media playback if we paused it
             if shouldResumeMedia {
@@ -1135,6 +1168,81 @@ final class ASRService: ObservableObject {
             self.benchmarkLog("stop_end result=error totalMs=\(self.elapsedMilliseconds(since: stopStartedAt)) error=\(error.localizedDescription)")
             return ""
         }
+    }
+
+    func transcribeSamplesForAPI(_ inputSamples: [Float]) async throws -> ASRTranscriptionResult {
+        var samples = inputSamples
+        guard !samples.isEmpty else {
+            return ASRTranscriptionResult(text: "", confidence: 0)
+        }
+
+        let minSamples = 16_000
+        if samples.count < minSamples {
+            samples.append(contentsOf: repeatElement(0.0, count: minSamples - samples.count))
+        }
+
+        try await self.ensureAsrReady()
+        guard self.transcriptionProvider.isReady else {
+            throw NSError(
+                domain: "ASRService",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "Transcription provider is not ready."]
+            )
+        }
+
+        let result = try await transcriptionExecutor.run { [provider = self.transcriptionProvider] in
+            try await provider.transcribeFinal(samples)
+        }
+
+        if !self.hasCompletedFirstTranscription {
+            self.hasCompletedFirstTranscription = true
+            self.isLoadingModel = false
+        }
+
+        let cleanedText = ASRService.applyCustomDictionary(ASRService.removeFillerWords(result.text))
+        self.recordWordBoostHitIfAny(transcribedText: cleanedText)
+        return ASRTranscriptionResult(text: cleanedText, confidence: result.confidence)
+    }
+
+    func transcribeFileForAPI(_ fileURL: URL) async throws -> (result: ASRTranscriptionResult, sampleCount: Int) {
+        guard FileManager.default.isReadableFile(atPath: fileURL.path) else {
+            throw NSError(
+                domain: "ASRService",
+                code: -3,
+                userInfo: [NSLocalizedDescriptionKey: "Audio file is not readable."]
+            )
+        }
+
+        let estimatedSamples = try LocalAPIAudioDecoder.validateDurationWithinLimit(for: fileURL)
+
+        try await self.ensureAsrReady()
+        let provider = self.transcriptionProvider
+        guard provider.isReady else {
+            throw NSError(
+                domain: "ASRService",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "Transcription provider is not ready."]
+            )
+        }
+
+        guard provider.prefersNativeFileTranscription else {
+            let samples = try LocalAPIAudioDecoder.samples(from: fileURL)
+            let result = try await self.transcribeSamplesForAPI(samples)
+            return (result, samples.count)
+        }
+
+        let result = try await transcriptionExecutor.run { [provider] in
+            try await provider.transcribeFile(at: fileURL)
+        }
+
+        if !self.hasCompletedFirstTranscription {
+            self.hasCompletedFirstTranscription = true
+            self.isLoadingModel = false
+        }
+
+        let cleanedText = ASRService.applyCustomDictionary(ASRService.removeFillerWords(result.text))
+        self.recordWordBoostHitIfAny(transcribedText: cleanedText)
+        return (ASRTranscriptionResult(text: cleanedText, confidence: result.confidence), estimatedSamples)
     }
 
     func stopWithoutTranscription() async {
@@ -2451,6 +2559,20 @@ final class ASRService: ObservableObject {
         self.modelsExistOnDisk = false
     }
 
+    func clearModelCache(for model: SettingsStore.SpeechModel) async throws {
+        DebugLogger.shared.debug("Clearing model cache for \(model.displayName)", source: "ASRService")
+        let provider = self.getProvider(for: model)
+        try await provider.clearCache()
+
+        if model.requiresExternalArtifacts {
+            SettingsStore.shared.setExternalCoreMLArtifactsDirectory(nil, for: model)
+        }
+
+        guard SettingsStore.shared.selectedSpeechModel == model else { return }
+        self.resetTranscriptionProvider()
+        await self.checkIfModelsExistAsync()
+    }
+
     // MARK: - Timer-based Streaming Transcription (No VAD)
 
     private func startStreamingTranscription() {
@@ -2674,11 +2796,24 @@ final class ASRService: ObservableObject {
     private let typingService = TypingService() // Reuse instance to avoid conflicts
 
     func typeTextToActiveField(_ text: String) {
-        self.typingService.typeTextInstantly(text)
+        self.typeTextToActiveField(text, preferredTargetPID: nil, textReadyAt: nil)
     }
 
-    func typeTextToActiveField(_ text: String, preferredTargetPID: pid_t?) {
-        self.typingService.typeTextInstantly(text, preferredTargetPID: preferredTargetPID)
+    func typeTextToActiveField(_ text: String, preferredTargetPID: pid_t?, textReadyAt: TimeInterval? = nil) {
+        let requestedAt = ProcessInfo.processInfo.systemUptime
+        let textReadyAge = textReadyAt.map { Int(((requestedAt - $0) * 1000).rounded()) }
+        DebugLogger.shared.benchmark(
+            "TYPING_BENCH",
+            message: "asr_type_request chars=\(text.count) preferredPID=\(preferredTargetPID.map { String($0) } ?? "nil") textReadyAgeMs=\(textReadyAge.map { String($0) } ?? "nil")",
+            source: "TypingBenchmark"
+        )
+        self.typingService.typeTextInstantly(text, preferredTargetPID: preferredTargetPID, textReadyAt: textReadyAt)
+        let dispatchedAt = ProcessInfo.processInfo.systemUptime
+        DebugLogger.shared.benchmark(
+            "TYPING_BENCH",
+            message: "asr_type_dispatched chars=\(text.count) preferredPID=\(preferredTargetPID.map { String($0) } ?? "nil") textReadyToDispatchMs=\(textReadyAt.map { String(Int(((dispatchedAt - $0) * 1000).rounded())) } ?? "nil")",
+            source: "TypingBenchmark"
+        )
     }
 
     /// Removes filler sounds from transcribed text
@@ -2771,24 +2906,101 @@ final class ASRService: ObservableObject {
     ///
     /// Feature requested by maxgaav – thank you for the suggestion!
     static func applyGAAVFormatting(_ text: String) -> String {
-        guard SettingsStore.shared.gaavModeEnabled else { return text }
         guard !text.isEmpty else { return text }
 
         var result = text
 
-        // Remove trailing period (if present)
-        if result.hasSuffix(".") {
+        if SettingsStore.shared.gaavRemoveTrailingPeriodEnabled, result.hasSuffix(".") {
             result.removeLast()
         }
 
-        // Lowercase the first character (if it's uppercase)
-        if let first = result.first, first.isUppercase {
+        if SettingsStore.shared.gaavLowercaseFirstLetterEnabled, let first = result.first, first.isUppercase {
             result = first.lowercased() + result.dropFirst()
         }
 
         return result
     }
+
+    // MARK: - Continuous Dictation Mode Formatting
+
+    /// Applies split continuous-dictation formatting so transcribed segments chain naturally.
+    /// Spacing and context-aware capitalization are independently controlled.
+    ///
+    /// Implements the chaining behavior requested in GitHub issue #390.
+    static func applyContinuousDictationFormatting(_ text: String, precedingText: String) -> String {
+        guard !text.isEmpty else { return text }
+        let spacingEnabled = SettingsStore.shared.continuousDictationSpacingEnabled
+        let smartCapsEnabled = SettingsStore.shared.contextAwareCapitalizationEnabled
+        guard spacingEnabled || smartCapsEnabled else { return text }
+
+        var result = text
+
+        if smartCapsEnabled {
+            let precedingTrimmed = precedingText.trimmingCharacters(in: .whitespaces)
+            let boundaryCharacter = self.lastCapitalizationBoundaryCharacter(in: precedingTrimmed)
+            if boundaryCharacter == nil || boundaryCharacter?.isSentenceEndingPunctuation == true {
+                result = self.replacingFirstLetter(in: result, transform: { $0.uppercased() })
+            } else {
+                result = self.replacingFirstLetter(in: result, transform: { $0.lowercased() })
+            }
+        }
+
+        if spacingEnabled {
+            if let lastPreceding = precedingText.last,
+               !lastPreceding.isWhitespace,
+               result.first?.isWhitespace != true
+            {
+                result = " " + result
+            }
+
+            if result.last?.isWhitespace != true {
+                result += " "
+            }
+        }
+
+        return result
+    }
+
+    private static func lastCapitalizationBoundaryCharacter(in text: String) -> Character? {
+        for character in text.reversed() {
+            if character.isNewline {
+                return nil
+            }
+            if character.isHorizontalWhitespace || character.isClosingPunctuationWrapper {
+                continue
+            }
+            return character
+        }
+        return nil
+    }
+
+    private static func replacingFirstLetter(in text: String, transform: (Character) -> String) -> String {
+        guard let index = text.firstIndex(where: { $0.isLetter }) else { return text }
+        let nextIndex = text.index(after: index)
+        return String(text[..<index]) + transform(text[index]) + String(text[nextIndex...])
+    }
 }
+
+private extension Character {
+    var isSentenceEndingPunctuation: Bool {
+        self == "." || self == "!" || self == "?"
+    }
+
+    var isHorizontalWhitespace: Bool {
+        self.unicodeScalars.allSatisfy { CharacterSet.whitespaces.contains($0) }
+    }
+
+    var isClosingPunctuationWrapper: Bool {
+        switch self {
+        case "\"", "'", "”", "’", "»", "›", ")", "]", "}", "」", "』":
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+// swiftlint:enable type_body_length
 
 private extension SettingsStore.SpeechModel {
     var nemotronProviderMode: NemotronProvider.Mode {
@@ -2828,6 +3040,7 @@ private extension ASRService {
 
     func runFastPreviewStopGraceIfNeeded() async {
         guard SettingsStore.shared.parakeetFinalizationMode == .tokenTimedChunkMerge else { return }
+        guard SettingsStore.shared.selectedSpeechModel.supportsFastDictationProcessing else { return }
         guard SettingsStore.shared.selectedSpeechModel.supportsStreaming else { return }
         guard self.transcriptionProvider is FluidAudioProvider else { return }
 

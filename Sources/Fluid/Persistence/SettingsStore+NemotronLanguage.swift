@@ -20,6 +20,7 @@ extension SettingsStore {
             try container.encode(self.rawValue)
         }
 
+        static let auto = Self(rawValue: "auto")
         static let english = Self(rawValue: "en")
 
         static let allCases: [Self] = [
@@ -46,6 +47,18 @@ extension SettingsStore {
                 return "\(localized) (\(self.rawValue))"
             }
             return self.rawValue
+        }
+
+        var compactDisplayName: String {
+            switch self.rawValue {
+            case "auto": return "Auto"
+            case "hi": return "Hindi"
+            case "en": return "English"
+            default:
+                return self.displayName
+                    .components(separatedBy: " (")
+                    .first ?? self.displayName
+            }
         }
 
         private static let displayNames: [String: String] = [

@@ -19,10 +19,12 @@ struct TranscriptionHistoryEntry: Codable, Identifiable, Equatable {
     let windowTitle: String
     let characterCount: Int
     let wasAIProcessed: Bool
+    let processingModel: String?
     /// Non-nil when AI post-processing was configured but failed and we fell
     /// back to typing the raw transcription. The string carries the error
     /// message for display / debugging.
     let aiProcessingError: String?
+    let audio: DictationAudioMetadata?
 
     init(
         id: UUID = UUID(),
@@ -31,7 +33,10 @@ struct TranscriptionHistoryEntry: Codable, Identifiable, Equatable {
         processedText: String,
         appName: String,
         windowTitle: String,
-        aiProcessingError: String? = nil
+        wasAIProcessed: Bool,
+        processingModel: String? = nil,
+        aiProcessingError: String? = nil,
+        audio: DictationAudioMetadata? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -40,8 +45,36 @@ struct TranscriptionHistoryEntry: Codable, Identifiable, Equatable {
         self.appName = appName
         self.windowTitle = windowTitle
         self.characterCount = processedText.count
-        self.wasAIProcessed = rawText != processedText
+        self.wasAIProcessed = wasAIProcessed
+        self.processingModel = processingModel
         self.aiProcessingError = aiProcessingError
+        self.audio = audio
+    }
+
+    private init(
+        id: UUID,
+        timestamp: Date,
+        rawText: String,
+        processedText: String,
+        appName: String,
+        windowTitle: String,
+        characterCount: Int,
+        wasAIProcessed: Bool,
+        processingModel: String?,
+        aiProcessingError: String?,
+        audio: DictationAudioMetadata?
+    ) {
+        self.id = id
+        self.timestamp = timestamp
+        self.rawText = rawText
+        self.processedText = processedText
+        self.appName = appName
+        self.windowTitle = windowTitle
+        self.characterCount = characterCount
+        self.wasAIProcessed = wasAIProcessed
+        self.processingModel = processingModel
+        self.aiProcessingError = aiProcessingError
+        self.audio = audio
     }
 
     init(from decoder: Decoder) throws {
@@ -54,12 +87,14 @@ struct TranscriptionHistoryEntry: Codable, Identifiable, Equatable {
         self.windowTitle = try container.decode(String.self, forKey: .windowTitle)
         self.characterCount = try container.decode(Int.self, forKey: .characterCount)
         self.wasAIProcessed = try container.decode(Bool.self, forKey: .wasAIProcessed)
+        self.processingModel = try container.decodeIfPresent(String.self, forKey: .processingModel)
         self.aiProcessingError = try container.decodeIfPresent(String.self, forKey: .aiProcessingError)
+        self.audio = try container.decodeIfPresent(DictationAudioMetadata.self, forKey: .audio)
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, timestamp, rawText, processedText, appName, windowTitle
-        case characterCount, wasAIProcessed, aiProcessingError
+        case characterCount, wasAIProcessed, processingModel, aiProcessingError, audio
     }
 
     /// Preview text for list display (first 80 chars)
@@ -84,6 +119,26 @@ struct TranscriptionHistoryEntry: Codable, Identifiable, Equatable {
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
         return formatter.string(from: self.timestamp)
+    }
+
+    var hasAudioMetadata: Bool {
+        self.audio != nil
+    }
+
+    func replacingAudio(_ audio: DictationAudioMetadata?) -> TranscriptionHistoryEntry {
+        TranscriptionHistoryEntry(
+            id: self.id,
+            timestamp: self.timestamp,
+            rawText: self.rawText,
+            processedText: self.processedText,
+            appName: self.appName,
+            windowTitle: self.windowTitle,
+            characterCount: self.characterCount,
+            wasAIProcessed: self.wasAIProcessed,
+            processingModel: self.processingModel,
+            aiProcessingError: self.aiProcessingError,
+            audio: audio
+        )
     }
 }
 
@@ -116,33 +171,49 @@ final class TranscriptionHistoryStore: ObservableObject {
 
     /// Add a new transcription entry
     func addEntry(
+        id: UUID = UUID(),
+        timestamp: Date = Date(),
         rawText: String,
         processedText: String,
         appName: String,
         windowTitle: String,
-        aiProcessingError: String? = nil
+        wasAIProcessed: Bool? = nil,
+        processingModel: String? = nil,
+        aiProcessingError: String? = nil,
+        audio: DictationAudioMetadata? = nil
     ) {
         // Skip empty transcriptions
         guard !processedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
         let entry = TranscriptionHistoryEntry(
+            id: id,
+            timestamp: timestamp,
             rawText: rawText,
             processedText: processedText,
             appName: appName,
             windowTitle: windowTitle,
-            aiProcessingError: aiProcessingError
+            wasAIProcessed: wasAIProcessed ?? (processingModel != nil && aiProcessingError == nil),
+            processingModel: processingModel,
+            aiProcessingError: aiProcessingError,
+            audio: audio
         )
 
         // Insert at beginning (newest first)
         self.entries.insert(entry, at: 0)
 
         self.saveEntries()
+        if audio != nil {
+            self.pruneAudioToBudget()
+        }
 
         DebugLogger.shared.debug("Added transcription to history (total: \(self.entries.count))", source: "TranscriptionHistoryStore")
     }
 
     /// Delete a specific entry
     func deleteEntry(id: UUID) {
+        if let audio = self.entries.first(where: { $0.id == id })?.audio {
+            DictationAudioHistoryStore.shared.deleteAudio(fileName: audio.fileName)
+        }
         self.entries.removeAll { $0.id == id }
 
         // Clear selection if deleted
@@ -155,6 +226,11 @@ final class TranscriptionHistoryStore: ObservableObject {
 
     /// Delete multiple entries
     func deleteEntries(ids: Set<UUID>) {
+        for entry in self.entries where ids.contains(entry.id) {
+            if let audio = entry.audio {
+                DictationAudioHistoryStore.shared.deleteAudio(fileName: audio.fileName)
+            }
+        }
         self.entries.removeAll { ids.contains($0.id) }
 
         if let selected = selectedEntryID, ids.contains(selected) {
@@ -166,6 +242,7 @@ final class TranscriptionHistoryStore: ObservableObject {
 
     /// Clear all history
     func clearAllHistory() {
+        DictationAudioHistoryStore.shared.deleteAllAudioFiles()
         self.entries.removeAll()
         self.selectedEntryID = nil
         self.saveEntries()
@@ -213,6 +290,65 @@ final class TranscriptionHistoryStore: ObservableObject {
         self.saveEntries()
     }
 
+    func attachAudio(_ audio: DictationAudioMetadata, to entryID: UUID) {
+        guard let index = self.entries.firstIndex(where: { $0.id == entryID }) else {
+            DictationAudioHistoryStore.shared.deleteAudio(fileName: audio.fileName)
+            return
+        }
+        self.entries[index] = self.entries[index].replacingAudio(audio)
+        self.saveEntries()
+        self.pruneAudioToBudget()
+    }
+
+    @discardableResult
+    func deleteAllSavedAudio() -> Int {
+        let removedCount = self.entries.filter { $0.audio != nil }.count
+        DictationAudioHistoryStore.shared.deleteAllAudioFiles()
+        self.entries = self.entries.map { $0.replacingAudio(nil) }
+        self.saveEntries()
+        DebugLogger.shared.info("Deleted saved dictation audio (\(removedCount) entries)", source: "TranscriptionHistoryStore")
+        return removedCount
+    }
+
+    @discardableResult
+    func pruneAudioToBudget() -> Int {
+        let budgetBytes = SettingsStore.shared.audioHistoryBudgetBytes
+        guard budgetBytes > 0 else {
+            return self.deleteAllSavedAudio()
+        }
+
+        var currentBytes = DictationAudioHistoryStore.shared.audioUsageBytes()
+        guard currentBytes > budgetBytes else { return 0 }
+
+        var updatedEntries = self.entries
+        let referencedFileNames = Set(updatedEntries.compactMap { $0.audio?.fileName })
+        let orphanedAudio = DictationAudioHistoryStore.shared.deleteUnreferencedAudioFiles(referencedFileNames: referencedFileNames)
+        if orphanedAudio.fileCount > 0 {
+            currentBytes = max(0, currentBytes - orphanedAudio.byteCount)
+            DebugLogger.shared.info("Pruned orphaned dictation audio (\(orphanedAudio.fileCount) files)", source: "TranscriptionHistoryStore")
+        }
+        guard currentBytes > budgetBytes else { return 0 }
+
+        var prunedCount = 0
+        for index in updatedEntries.indices.reversed() {
+            guard let audio = updatedEntries[index].audio else { continue }
+            let removedBytes = DictationAudioHistoryStore.shared.deleteAudio(fileName: audio.fileName)
+            currentBytes = max(0, currentBytes - removedBytes)
+            updatedEntries[index] = updatedEntries[index].replacingAudio(nil)
+            prunedCount += 1
+            if currentBytes <= budgetBytes {
+                break
+            }
+        }
+
+        if prunedCount > 0 {
+            self.entries = updatedEntries
+            self.saveEntries()
+            DebugLogger.shared.info("Pruned saved dictation audio (\(prunedCount) entries)", source: "TranscriptionHistoryStore")
+        }
+        return prunedCount
+    }
+
     // MARK: - Private Methods
 
     private func loadEntries() {
@@ -236,6 +372,38 @@ final class TranscriptionHistoryStore: ObservableObject {
 // MARK: - Stats Computation Extension
 
 extension TranscriptionHistoryStore {
+    struct TodaySummary {
+        let words: Int
+        let transcriptions: Int
+
+        func timeSavedMinutes(typingWPM: Int = 40, speakingWPM: Int = 150) -> Double {
+            guard typingWPM > 0 && speakingWPM > 0 else { return 0 }
+
+            let words = Double(self.words)
+            let typingTime = words / Double(typingWPM)
+            let speakingTime = words / Double(speakingWPM)
+
+            return max(0, typingTime - speakingTime)
+        }
+
+        func formattedTimeSaved(typingWPM: Int = 40) -> String {
+            let minutes = self.timeSavedMinutes(typingWPM: typingWPM)
+
+            if minutes < 1 {
+                return "< 1m"
+            } else if minutes < 60 {
+                return "\(Int(minutes))m"
+            } else {
+                let hours = Int(minutes) / 60
+                let mins = Int(minutes) % 60
+                if mins == 0 {
+                    return "\(hours)h"
+                }
+                return "\(hours)h \(mins)m"
+            }
+        }
+    }
+
     // MARK: - Word Counting
 
     /// Count words in a string (handles multiple spaces, newlines)
@@ -253,13 +421,26 @@ extension TranscriptionHistoryStore {
         self.entries.reduce(0) { $0 + self.wordCount(in: $1.processedText) }
     }
 
-    /// Words transcribed today
-    var wordsToday: Int {
+    /// Summary for today's activity, calculated in one pass.
+    var todaySummary: TodaySummary {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
-        return self.entries
-            .filter { calendar.isDate($0.timestamp, inSameDayAs: today) }
-            .reduce(0) { $0 + self.wordCount(in: $1.processedText) }
+        let totals = self.entries.reduce(into: (words: 0, transcriptions: 0)) { result, entry in
+            guard calendar.isDate(entry.timestamp, inSameDayAs: today) else { return }
+            result.words += self.wordCount(in: entry.processedText)
+            result.transcriptions += 1
+        }
+        return TodaySummary(words: totals.words, transcriptions: totals.transcriptions)
+    }
+
+    /// Words transcribed today
+    var wordsToday: Int {
+        self.todaySummary.words
+    }
+
+    /// Number of transcriptions recorded today
+    var transcriptionsToday: Int {
+        self.todaySummary.transcriptions
     }
 
     /// Average words per transcription
@@ -300,6 +481,21 @@ extension TranscriptionHistoryStore {
             }
             return "\(hours)h \(mins)m"
         }
+    }
+
+    // MARK: - Today Time Saved
+
+    /// Calculate time saved today in minutes
+    /// - Parameters:
+    ///   - typingWPM: User's typing speed (default 40)
+    ///   - speakingWPM: Average speaking speed (default 150)
+    func timeSavedTodayMinutes(typingWPM: Int = 40, speakingWPM: Int = 150) -> Double {
+        self.todaySummary.timeSavedMinutes(typingWPM: typingWPM, speakingWPM: speakingWPM)
+    }
+
+    /// Formatted time saved today string (e.g., "2h 45m" or "45m")
+    func formattedTimeSavedToday(typingWPM: Int = 40) -> String {
+        self.todaySummary.formattedTimeSaved(typingWPM: typingWPM)
     }
 
     // MARK: - Streak Calculation

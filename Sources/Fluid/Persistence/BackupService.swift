@@ -12,9 +12,11 @@ struct SettingsBackupPayload: Codable, Equatable {
     let selectedModelByProvider: [String: String]
     let savedProviders: [SettingsStore.SavedProvider]
     let modelReasoningConfigs: [String: SettingsStore.ModelReasoningConfig]
+    let privateAIPrefixKVCacheEnabled: Bool?
     let selectedSpeechModel: SettingsStore.SpeechModel
     let selectedCohereLanguage: SettingsStore.CohereLanguage
     let selectedNemotronLanguage: SettingsStore.NemotronLanguage?
+    let selectedAppleSpeechLocaleIdentifier: String?
     let hotkeyShortcut: HotkeyShortcut
     let promptModeHotkeyShortcut: HotkeyShortcut
     let promptModeShortcutEnabled: Bool
@@ -34,6 +36,7 @@ struct SettingsBackupPayload: Codable, Equatable {
     let cancelRecordingHotkeyShortcut: HotkeyShortcut
     let showThinkingTokens: Bool
     let hideFromDockAndAppSwitcher: Bool
+    let showMainWindowAtLoginLaunch: Bool?
     let accentColorOption: SettingsStore.AccentColorOption
     let transcriptionStartSound: SettingsStore.TranscriptionStartSound
     let transcriptionSoundVolume: Float
@@ -57,17 +60,25 @@ struct SettingsBackupPayload: Codable, Equatable {
     let transcriptionPreviewCharLimit: Int
     let userTypingWPM: Int
     let saveTranscriptionHistory: Bool
+    let saveAudioWithTranscriptionHistory: Bool?
+    let audioHistoryBudgetGB: Double?
     let notifyAIProcessingFailures: Bool?
     let weekendsDontBreakStreak: Bool
     let fillerWords: [String]
     let removeFillerWordsEnabled: Bool
     let gaavModeEnabled: Bool
+    let gaavLowercaseFirstLetterEnabled: Bool?
+    let gaavRemoveTrailingPeriodEnabled: Bool?
+    let continuousDictationModeEnabled: Bool?
+    let continuousDictationSpacingEnabled: Bool?
+    let contextAwareCapitalizationEnabled: Bool?
     let pauseMediaDuringTranscription: Bool
     let vocabularyBoostingEnabled: Bool
     let customDictionaryEntries: [SettingsStore.CustomDictionaryEntry]
     let selectedDictationPromptID: String?
     let dictationPromptOff: Bool?
     let dictationPromptRoutingScope: SettingsStore.PromptRoutingScope?
+    let editPromptOff: Bool?
     let selectedEditPromptID: String?
     let editPromptRoutingScope: SettingsStore.PromptRoutingScope?
     let defaultDictationPromptOverride: String?
@@ -125,9 +136,10 @@ final class BackupService {
     func decode(_ data: Data) throws -> AppBackupDocument {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
+        let migratedData = Self.dataByMigratingLegacyPrivateAIKeys(in: data) ?? data
 
         do {
-            let document = try decoder.decode(AppBackupDocument.self, from: data)
+            let document = try decoder.decode(AppBackupDocument.self, from: migratedData)
             try self.validate(document)
             return document
         } catch let error as BackupServiceError {
@@ -158,6 +170,24 @@ final class BackupService {
         guard document.schemaVersion.major == BackupFileVersion.current.major else {
             throw BackupServiceError.unsupportedSchemaVersion(document.schemaVersion)
         }
+    }
+
+    private static func dataByMigratingLegacyPrivateAIKeys(in data: Data) -> Data? {
+        guard var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var settings = root["settings"] as? [String: Any],
+              settings["privateAIPrefixKVCacheEnabled"] == nil
+        else {
+            return nil
+        }
+
+        let legacyPrefixCacheKey = ["fluid", "Int", "elligence", "PrefixKVCacheEnabled"].joined()
+        guard let legacyValue = settings[legacyPrefixCacheKey] else {
+            return nil
+        }
+
+        settings["privateAIPrefixKVCacheEnabled"] = legacyValue
+        root["settings"] = settings
+        return try? JSONSerialization.data(withJSONObject: root)
     }
 }
 

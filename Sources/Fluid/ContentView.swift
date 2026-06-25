@@ -16,15 +16,31 @@ import SwiftUI
 // MARK: - AI Processing Errors
 
 enum AIProcessingError: LocalizedError {
+    case noVerifiedProvider
     case missingAPIKey(provider: String)
+    case missingModel(provider: String)
     case emptyResponse
 
     var errorDescription: String? {
         switch self {
+        case .noVerifiedProvider:
+            return "No verified AI provider selected"
         case let .missingAPIKey(provider):
             return "API key not set for \(provider)"
+        case let .missingModel(provider):
+            return "No model selected for \(provider)"
         case .emptyResponse:
             return "AI returned an empty response"
+        }
+    }
+
+    /// Configuration errors the user can fix in AI Enhancement settings.
+    var isConfigurationError: Bool {
+        switch self {
+        case .noVerifiedProvider, .missingAPIKey, .missingModel:
+            return true
+        case .emptyResponse:
+            return false
         }
     }
 }
@@ -45,12 +61,14 @@ enum SidebarItem: Hashable {
     case rewriteMode
 }
 
-enum ShortcutRecordingTarget: String, Hashable {
+enum ShortcutRecordingTarget: Hashable {
     case primaryDictation
     case secondaryDictation
     case command
     case edit
     case cancel
+    case dictationPrompt(String)
+    case newPrompt
 
     var title: String {
         switch self {
@@ -64,6 +82,10 @@ enum ShortcutRecordingTarget: String, Hashable {
             return "Edit Mode"
         case .cancel:
             return "Cancel Recording"
+        case .dictationPrompt:
+            return "Prompt Shortcut"
+        case .newPrompt:
+            return "New Prompt Shortcut"
         }
     }
 
@@ -71,9 +93,14 @@ enum ShortcutRecordingTarget: String, Hashable {
         switch self {
         case .secondaryDictation, .command, .edit:
             return true
-        case .primaryDictation, .cancel:
+        case .primaryDictation, .cancel, .dictationPrompt, .newPrompt:
             return false
         }
+    }
+
+    var promptConfigurationKey: String? {
+        if case let .dictationPrompt(key) = self { return key }
+        return nil
     }
 }
 
@@ -85,7 +112,7 @@ enum ShortcutRecordingTarget: String, Hashable {
 
 // NOTE: Streaming and AI response parsing is now handled by LLMClient
 
-// swiftlint:disable type_body_length
+// swiftlint:disable type_body_length file_length
 struct ContentView: View {
     private enum ActiveRecordingMode: String {
         case none
@@ -131,13 +158,13 @@ struct ContentView: View {
     @State private var cancelRecordingHotkeyShortcut: HotkeyShortcut = SettingsStore.shared.cancelRecordingHotkeyShortcut
     @State private var isPromptModeShortcutEnabled: Bool = SettingsStore.shared.promptModeShortcutEnabled
     @State private var isCommandModeShortcutEnabled: Bool = SettingsStore.shared.commandModeShortcutEnabled
-    @State private var aiSettingsExpanded: Bool = true
     @State private var isRewriteModeShortcutEnabled: Bool = SettingsStore.shared.rewriteModeShortcutEnabled
     @State private var isRecordingForRewrite: Bool = false // Track if current recording is for rewrite mode
     @State private var isRecordingForCommand: Bool = false // Track if current recording is for command mode
     @State private var promptModeOverrideText: String? // System prompt text to use when in prompt mode
     @State private var activeDictationShortcutSlot: SettingsStore.DictationShortcutSlot? = nil
     @State private var activeRecordingMode: ActiveRecordingMode = .none
+    @State private var pendingAIReprocessText: String? = nil
     @State private var activeShortcutRecordingTarget: ShortcutRecordingTarget? = nil
     @State private var currentRecordingModifierKeyCodes: Set<UInt16> = []
     @State private var pendingModifierKeyCodes: Set<UInt16> = []
@@ -151,6 +178,7 @@ struct ContentView: View {
     @State private var previousSidebarItem: SidebarItem? = nil // Track previous for mode transitions
     @State private var playgroundUsed: Bool = SettingsStore.shared.playgroundUsed
     @State private var recordingAppInfo: (name: String, bundleId: String, windowTitle: String)? = nil
+    @State private var recordingPrecedingText: String = ""
 
     // Command Mode State
     // @State private var showCommandMode: Bool = false
@@ -166,7 +194,7 @@ struct ContentView: View {
     @State private var aiInputText: String = ""
     @State private var aiOutputText: String = ""
     @State private var isCallingAI: Bool = false
-    @State private var openAIBaseURL: String = ModelRepository.shared.defaultBaseURL(for: "openai")
+    @State private var openAIBaseURL: String = ""
 
     @State private var enableDebugLogs: Bool = SettingsStore.shared.enableDebugLogs
     @State private var hotkeyMode: HotkeyActivationMode = SettingsStore.shared.hotkeyMode
@@ -181,6 +209,10 @@ struct ContentView: View {
     private let accessibilityRestartFlagKey = "FluidVoice_AccessibilityRestartPending"
     private let hasAutoRestartedForAccessibilityKey = "FluidVoice_HasAutoRestartedForAccessibility"
     @State private var accessibilityPollingTask: Task<Void, Never>?
+    @State private var accessibilityGuidePanel: NSPanel?
+    @State private var accessibilityGuideMonitorTask: Task<Void, Never>?
+    @State private var accessibilityGuideRequestID: UUID?
+    @State private var prewarmDictationTask: Task<Void, Never>?
 
     private var isRecordingAnyShortcutCapture: Bool {
         self.activeShortcutRecordingTarget != nil
@@ -191,8 +223,8 @@ struct ContentView: View {
     // Models scoped by provider (name -> [models])
     @State private var availableModelsByProvider: [String: [String]] = [:]
     @State private var selectedModelByProvider: [String: String] = [:]
-    @State private var availableModels: [String] = ["gpt-4.1"] // derived from currentProvider
-    @State private var selectedModel: String = "gpt-4.1" // derived from currentProvider
+    @State private var availableModels: [String] = [] // derived from currentProvider
+    @State private var selectedModel: String = "" // derived from currentProvider
     @State private var showingAddModel: Bool = false
     @State private var newModelName: String = ""
 
@@ -205,7 +237,7 @@ struct ContentView: View {
     // MARK: - Provider Management
 
     @State private var providerAPIKeys: [String: String] = [:] // [providerKey: apiKey]
-    @State private var currentProvider: String = "openai" // canonical key: "openai" | "groq" | "custom:<id>"
+    @State private var currentProvider: String = "" // canonical key: "openai" | "groq" | "custom:<id>"
 
     @State private var savedProviders: [SettingsStore.SavedProvider] = []
     @State private var selectedProviderID: String = SettingsStore.shared.selectedProviderID
@@ -233,481 +265,503 @@ struct ContentView: View {
         let nav = env.onChange(of: self.menuBarManager.requestedNavigationDestination) { _, destination in
             self.handleMenuBarNavigation(destination)
         }
+        let sized = nav.fluidWindowSizing(self.windowSizing)
 
-        return nav.onAppear {
-            self.appear = true
-            self.accessibilityEnabled = self.checkAccessibilityPermissions()
+        let observed = self.applyShortcutStateChanges(to: sized)
 
-            // Handle any pending menu-bar navigation (e.g., Preferences clicked before window existed).
-            self.handleMenuBarNavigation(self.menuBarManager.requestedNavigationDestination)
-            // If a previous run set a pending restart, clear it now on fresh launch
-            if UserDefaults.standard.bool(forKey: self.accessibilityRestartFlagKey) {
-                UserDefaults.standard.set(false, forKey: self.accessibilityRestartFlagKey)
-                self.showRestartPrompt = false
+        return observed
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                let trusted = AXIsProcessTrusted()
+                if trusted != self.accessibilityEnabled {
+                    self.accessibilityEnabled = trusted
+                }
             }
-            // Ensure no restart UI shows if we already have trust
-            if self.accessibilityEnabled { self.showRestartPrompt = false }
-
-            // Set default selection if none exists (from menu bar navigation)
-            // Show Preferences as default once voice model is ready (AI enhancement is optional)
-            if self.selectedSidebarItem == nil {
-                let isOnboarded = self.asr.isAsrReady || self.asr.modelsExistOnDisk
-                self.selectedSidebarItem = isOnboarded ? .preferences : .welcome
+            .onReceive(NotificationCenter.default.publisher(for: .openCustomDictionaryFromVoiceEngine)) { _ in
+                self.selectedSidebarItem = .customDictionary
             }
-            self.handlePendingAppNavigation()
-
-            // Reset auto-restart flag if permission was revoked (allows re-triggering if user re-grants)
-            if !self.accessibilityEnabled {
-                UserDefaults.standard.set(false, forKey: self.hasAutoRestartedForAccessibilityKey)
+            .onReceive(NotificationCenter.default.publisher(for: .appNavigationRequested)) { _ in
+                self.handlePendingAppNavigation()
             }
+            .onReceive(NotificationCenter.default.publisher(for: .dictationPromptShortcutsChanged)) { _ in
+                self.hotkeyManager?.updatePromptShortcutAssignments(SettingsStore.shared.dictationPromptShortcutAssignments())
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .settingsBackupDidRestore)) { _ in
+                self.reloadSettingsStateAfterBackupRestore()
+            }
+            .toolbar {
+                if !self.settings.shouldShowOnboarding {
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        self.todayStatsButton
 
-            // Initialize menu bar after app is ready (prevents window server crash)
-            self.menuBarManager.initializeMenuBar()
+                        self.themePreferenceButton
 
-            // DEFENSIVE STRATEGY: Multi-layer protection against startup crash
-            // Layer 1: Service consolidation (already done - no duplicate @StateObjects)
-            // Layer 2: Lazy service initialization (services created on first access)
-            // Layer 3: Startup gate (signalUIReady + 1.5s delay)
-            // Layer 4: Delayed audio initialization (CoreAudio listeners start after UI is stable)
-            //
-            // This delay ensures SwiftUI's AttributeGraph has finished processing before
-            // any heavy audio system work begins. The race condition between CoreAudio's
-            // HALSystem initialization and SwiftUI metadata processing causes EXC_BAD_ACCESS at 0x0.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                DebugLogger.shared.info("🚦 Startup delay complete, signaling UI ready...", source: "ContentView")
-
-                // Signal that UI is ready - this enables service initialization
-                self.appServices.signalUIReady()
-
-                DebugLogger.shared.info("🔊 Starting delayed audio initialization...", source: "ContentView")
-
-                // Now it's safe to access services (they'll be lazily created)
-                self.audioObserver.startObserving()
-                self.asr.initialize()
-
-                // Configure menu bar manager with ASR service AFTER services are initialized
-                self.menuBarManager.configure(asrService: self.appServices.asr)
-
-                // Load available devices
+                        Button(action: self.openIssueReportingPage) {
+                            Image(systemName: "ladybug.fill")
+                        }
+                        .help("Report an issue")
+                        .accessibilityLabel("Report an issue")
+                    }
+                }
+            }
+            .toolbar(removing: .sidebarToggle)
+            .overlay(alignment: .center) {}
+            .alert(
+                self.asr.errorTitle,
+                isPresented: Binding(
+                    get: { self.asr.showError },
+                    set: { self.asr.showError = $0 }
+                )
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(self.asr.errorMessage)
+            }
+            .onChange(of: self.audioObserver.changeTick) { _, _ in
+                // Hardware change detected → refresh device lists
                 self.refreshDevices()
 
-                // Set default selection if empty
-                if self.selectedInputUID.isEmpty, let defIn = AudioDevice.getDefaultInputDevice()?.uid { self.selectedInputUID = defIn }
-                if self.selectedOutputUID.isEmpty, let defOut = AudioDevice.getDefaultOutputDevice()?.uid { self.selectedOutputUID = defOut }
-
-                // Input device UI should mirror the current macOS default device.
-                if let systemInputUID = AudioDevice.getDefaultInputDevice()?.uid,
-                   self.inputDevices.contains(where: { $0.uid == systemInputUID })
-                {
-                    self.selectedInputUID = systemInputUID
-                }
-
-                if let prefOut = SettingsStore.shared.preferredOutputDeviceUID,
-                   prefOut.isEmpty == false,
-                   outputDevices.first(where: { $0.uid == prefOut }) != nil
-                {
-                    self.selectedOutputUID = prefOut
-                }
-
-                DebugLogger.shared.info("✅ Audio subsystems initialized", source: "ContentView")
-            }
-
-            // Set up notch click callback for expanding command conversation
-            NotchOverlayManager.shared.onNotchClicked = {
-                guard NotchOverlayManager.shared.canHandleNotchCommandTap else { return }
-                // When notch is clicked in command mode, show expanded conversation
-                if NotchOverlayManager.shared.canShowExpandedCommandOutput,
-                   !NotchContentState.shared.commandConversationHistory.isEmpty
-                {
-                    NotchOverlayManager.shared.showExpandedCommandOutput()
-                }
-            }
-
-            // Set up command mode callbacks for notch
-            NotchOverlayManager.shared.onCommandFollowUp = { [weak commandModeService] text in
-                guard NotchOverlayManager.shared.allowsCommandNotchActions else { return }
-                await commandModeService?.processFollowUpCommand(text)
-            }
-
-            // Chat management callbacks
-            NotchOverlayManager.shared.onNewChat = { [weak commandModeService] in
-                guard NotchOverlayManager.shared.allowsCommandNotchActions else { return }
-                commandModeService?.createNewChat()
-            }
-
-            NotchOverlayManager.shared.onSwitchChat = { [weak commandModeService] chatID in
-                guard NotchOverlayManager.shared.allowsCommandNotchActions else { return }
-                commandModeService?.switchToChat(id: chatID)
-            }
-
-            NotchOverlayManager.shared.onClearChat = { [weak commandModeService] in
-                guard NotchOverlayManager.shared.allowsCommandNotchActions else { return }
-                commandModeService?.deleteCurrentChat()
-            }
-
-            // Start polling for accessibility permission if not granted
-            self.startAccessibilityPolling()
-
-            // Initialize hotkey manager with improved timing and validation
-            self.initializeHotkeyManagerIfNeeded()
-
-            // Note: Overlay is now managed by MenuBarManager (persists even when window closed)
-
-            // Devices loaded in delayed audio initialization block
-            // Device defaults and preferences handled in delayed block
-
-            // Preload ASR model on app startup (with small delay to let app initialize)
-            Task {
-                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
-                await self.preloadASRModel()
-            }
-
-            // Load saved provider ID first
-            self.selectedProviderID = SettingsStore.shared.selectedProviderID
-
-            // Establish provider context first
-            self.updateCurrentProvider()
-
-            self.enableDebugLogs = SettingsStore.shared.enableDebugLogs
-            self.availableModelsByProvider = SettingsStore.shared.availableModelsByProvider
-            self.selectedModelByProvider = SettingsStore.shared.selectedModelByProvider
-            self.providerAPIKeys = SettingsStore.shared.providerAPIKeys
-            self.savedProviders = SettingsStore.shared.savedProviders
-
-            // Migration & cleanup: normalize provider keys and drop legacy flat lists
-            var normalized: [String: [String]] = [:]
-            for (key, models) in self.availableModelsByProvider {
-                let lower = key.lowercased()
-                let newKey: String
-                // Use ModelRepository to correctly identify ALL built-in providers
-                if ModelRepository.shared.isBuiltIn(lower) {
-                    newKey = lower
+                // Only sync UI with system defaults when sync is enabled
+                // When sync is disabled, keep the user's preferred device selection
+                if SettingsStore.shared.syncAudioDevicesWithSystem {
+                    // Sync mode: Update UI to match current system defaults
+                    if let sysIn = AudioDevice.getDefaultInputDevice()?.uid {
+                        self.selectedInputUID = sysIn
+                    }
+                    if let sysOut = AudioDevice.getDefaultOutputDevice()?.uid {
+                        self.selectedOutputUID = sysOut
+                    }
                 } else {
-                    newKey = key.hasPrefix("custom:") ? key : "custom:\(key)"
-                }
-                // Keep only unique, trimmed models
-                let clean = Array(Set(models.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) })).sorted()
-                if !clean.isEmpty { normalized[newKey] = clean }
-            }
-            self.availableModelsByProvider = normalized
-            SettingsStore.shared.availableModelsByProvider = normalized
-
-            // Normalize selectedModelByProvider keys similarly and drop invalid selections
-            var normalizedSel: [String: String] = [:]
-            for (key, model) in self.selectedModelByProvider {
-                let lower = key.lowercased()
-                // Use ModelRepository to correctly identify ALL built-in providers
-                let newKey: String = ModelRepository.shared.isBuiltIn(lower) ? lower :
-                    (key.hasPrefix("custom:") ? key : "custom:\(key)")
-                if let list = normalized[newKey], list.contains(model) { normalizedSel[newKey] = model }
-            }
-            self.selectedModelByProvider = normalizedSel
-            SettingsStore.shared.selectedModelByProvider = normalizedSel
-
-            // Determine initial model list without legacy flat-list fallback
-            if let saved = savedProviders.first(where: { $0.id == selectedProviderID }) {
-                // Use models from saved provider
-                self.availableModels = saved.models
-                self.openAIBaseURL = saved.baseURL
-            } else if let stored = availableModelsByProvider[currentProvider], !stored.isEmpty {
-                // Use provider-specific stored list if present
-                self.availableModels = stored
-            } else {
-                // Built-in defaults
-                self.availableModels = ModelRepository.shared.defaultModels(for: self.providerKey(for: self.selectedProviderID))
-            }
-
-            // Restore previously selected model if valid
-            if let sel = selectedModelByProvider[currentProvider], availableModels.contains(sel) {
-                self.selectedModel = sel
-            } else if let first = availableModels.first {
-                self.selectedModel = first
-            }
-
-            NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
-                let eventModifiers = event.modifierFlags.intersection([.function, .command, .option, .control, .shift])
-                let isRecordingAnyShortcut = self.isRecordingAnyShortcutCapture
-                let recordingTarget = self.activeShortcutRecordingTarget
-
-                if event.type == .keyDown {
-                    guard isRecordingAnyShortcut else {
-                        if self.cancelRecordingHotkeyShortcut.matches(keyCode: event.keyCode, modifiers: eventModifiers),
-                           self.handleCancelShortcut()
-                        {
-                            return nil
-                        }
-                        self.shortcutRecordingMessage = nil
-                        self.resetPendingShortcutState()
-                        return event
-                    }
-
-                    let keyCode = event.keyCode
-                    if keyCode == 53 && recordingTarget != .cancel {
-                        DebugLogger.shared.debug("NSEvent monitor: Escape pressed, cancelling shortcut recording", source: "ContentView")
-                        self.clearShortcutRecordingMode()
-                        return nil
-                    }
-
-                    let combinedModifiers = self.pendingModifierFlags.union(eventModifiers)
-                    let newShortcut = HotkeyShortcut(keyCode: keyCode, modifierFlags: combinedModifiers)
-                    DebugLogger.shared.debug("NSEvent monitor: Recording new shortcut: \(newShortcut.displayString)", source: "ContentView")
-
-                    if let recordingTarget,
-                       let conflictMessage = self.shortcutConflictMessage(for: newShortcut, target: recordingTarget)
+                    // Independent mode: Only update if preferred device is no longer available
+                    if let prefIn = SettingsStore.shared.preferredInputDeviceUID,
+                       inputDevices.contains(where: { $0.uid == prefIn })
                     {
-                        self.shortcutRecordingMessage = conflictMessage
-                        self.resetPendingShortcutState()
-                        DebugLogger.shared.debug("NSEvent monitor: Shortcut conflict while recording: \(conflictMessage)", source: "ContentView")
-                        return nil
+                        self.selectedInputUID = prefIn
+                    } else if let sysIn = AudioDevice.getDefaultInputDevice()?.uid {
+                        // Fallback to system default if preferred device disconnected
+                        self.selectedInputUID = sysIn
+                        SettingsStore.shared.preferredInputDeviceUID = sysIn
                     }
 
-                    self.shortcutRecordingMessage = nil
-                    if let recordingTarget {
-                        self.assignRecordedShortcut(newShortcut, to: recordingTarget)
+                    if let prefOut = SettingsStore.shared.preferredOutputDeviceUID,
+                       outputDevices.contains(where: { $0.uid == prefOut })
+                    {
+                        self.selectedOutputUID = prefOut
+                    } else if let sysOut = AudioDevice.getDefaultOutputDevice()?.uid {
+                        // Fallback to system default if preferred device disconnected
+                        self.selectedOutputUID = sysOut
+                        SettingsStore.shared.preferredOutputDeviceUID = sysOut
                     }
-                    self.resetPendingShortcutState()
-                    DebugLogger.shared.debug("NSEvent monitor: Finished recording shortcut", source: "ContentView")
-                    return nil
-                } else if event.type == .flagsChanged {
-                    guard isRecordingAnyShortcut else {
-                        self.shortcutRecordingMessage = nil
-                        self.resetPendingShortcutState()
-                        return event
-                    }
-
-                    let changedModifierFlag = HotkeyShortcut.modifierFlag(forKeyCode: event.keyCode)
-
-                    if eventModifiers.isEmpty {
-                        if self.pendingModifierOnly, let modifierKeyCode = pendingModifierKeyCode {
-                            let newShortcut = HotkeyShortcut(
-                                keyCode: modifierKeyCode,
-                                modifierFlags: self.pendingModifierFlags,
-                                modifierKeyCodes: Array(self.pendingModifierKeyCodes)
-                            )
-                            DebugLogger.shared.debug("NSEvent monitor: Recording modifier-only shortcut: \(newShortcut.displayString)", source: "ContentView")
-
-                            if let recordingTarget,
-                               let conflictMessage = self.shortcutConflictMessage(for: newShortcut, target: recordingTarget)
-                            {
-                                self.shortcutRecordingMessage = conflictMessage
-                                self.resetPendingShortcutState()
-                                DebugLogger.shared.debug("NSEvent monitor: Modifier shortcut conflict while recording: \(conflictMessage)", source: "ContentView")
-                                return nil
-                            }
-
-                            self.shortcutRecordingMessage = nil
-                            if let recordingTarget {
-                                self.assignRecordedShortcut(newShortcut, to: recordingTarget)
-                            }
-                            self.resetPendingShortcutState()
-                            DebugLogger.shared.debug("NSEvent monitor: Finished recording modifier shortcut", source: "ContentView")
-                            return nil
-                        }
-
-                        self.resetPendingShortcutState()
-                        DebugLogger.shared.debug("NSEvent monitor: Modifiers released without recording, continuing to wait", source: "ContentView")
-                        return nil
-                    }
-
-                    // Keep the actual changed modifier key as the trigger key and preserve
-                    // the full pressed modifier set until the combo is finalized.
-                    if let changedModifierFlag {
-                        let isRelease = self.currentRecordingModifierKeyCodes.contains(event.keyCode)
-
-                        if isRelease {
-                            self.currentRecordingModifierKeyCodes.remove(event.keyCode)
-                        } else if eventModifiers.contains(changedModifierFlag) {
-                            self.currentRecordingModifierKeyCodes.insert(event.keyCode)
-                            self.pendingModifierKeyCodes.insert(event.keyCode)
-                            self.pendingModifierFlags = self.pendingModifierFlags.union(eventModifiers)
-                            self.pendingModifierKeyCode = event.keyCode
-                            self.pendingModifierOnly = true
-                            DebugLogger.shared.debug("NSEvent monitor: Modifier key pressed during recording, pending modifiers: \(self.pendingModifierFlags)", source: "ContentView")
-                        }
-                    }
-                    return nil
-                }
-
-                return event
-            }
-        }
-        .onChange(of: self.accessibilityEnabled) { _, enabled in
-            if enabled && self.hotkeyManager != nil && !self.hotkeyManagerInitialized {
-                DebugLogger.shared.debug("Accessibility enabled, reinitializing hotkey manager", source: "ContentView")
-                self.hotkeyManager?.reinitialize()
-            }
-        }
-        .onChange(of: self.selectedModel) { _, newValue in
-            if newValue != "__ADD_MODEL__" {
-                self.selectedModelByProvider[self.currentProvider] = newValue
-                SettingsStore.shared.selectedModelByProvider = self.selectedModelByProvider
-            }
-        }
-        .onChange(of: self.selectedProviderID) { _, newValue in
-            SettingsStore.shared.selectedProviderID = newValue
-        }
-        .onChange(of: self.activeShortcutRecordingTarget) { _, _ in
-            self.hotkeyManager?.resetModifierOnlyShortcutTracking()
-        }
-        .onChange(of: self.isPromptModeShortcutEnabled) { newValue in
-            SettingsStore.shared.promptModeShortcutEnabled = newValue
-            self.hotkeyManager?.updatePromptModeShortcutEnabled(newValue)
-
-            if !newValue {
-                if self.activeShortcutRecordingTarget == .secondaryDictation {
-                    self.clearShortcutRecordingMode()
-                }
-
-                if self.activeRecordingMode == .promptMode {
-                    if self.asr.isRunning {
-                        Task { await self.asr.stopWithoutTranscription() }
-                    }
-                    self.clearActiveRecordingMode()
-                    self.menuBarManager.setOverlayMode(.dictation)
                 }
             }
-        }
-        .onChange(of: self.isCommandModeShortcutEnabled) { newValue in
-            SettingsStore.shared.commandModeShortcutEnabled = newValue
-            self.hotkeyManager?.updateCommandModeShortcutEnabled(newValue)
+            .onDisappear {
+                Task { await self.asr.stopWithoutTranscription() }
+                self.cancelPrewarmDictationIfNeeded()
+                // Note: Overlay lifecycle is now managed by MenuBarManager
+                // Note: NotchContentState handlers capture self (a struct value copy) and are
+                // intentionally kept alive so the overlay remains fully functional when the
+                // settings window is closed. No retain cycle risk since ContentView is a value type.
 
-            if !newValue {
-                if self.activeShortcutRecordingTarget == .command {
-                    self.clearShortcutRecordingMode()
-                }
+                // Stop accessibility polling
+                self.finishAccessibilityPermissionFlow()
+            }
+            .onChange(of: self.hotkeyShortcut) { _, newValue in
+                DebugLogger.shared.debug("Hotkey shortcut changed to \(newValue.displayString)", source: "ContentView")
+                self.hotkeyManager?.updateShortcut(newValue)
 
-                if self.activeRecordingMode == .command {
-                    if self.asr.isRunning {
-                        Task { await self.asr.stopWithoutTranscription() }
-                    }
-                    self.clearActiveRecordingMode()
-                    self.menuBarManager.setOverlayMode(.dictation)
+                // Update initialization status after shortcut change
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.hotkeyManagerInitialized = self.hotkeyManager?.validateEventTapHealth() ?? false
+                    DebugLogger.shared.debug(
+                        "Hotkey manager initialized: \(self.hotkeyManagerInitialized)",
+                        source: "ContentView"
+                    )
                 }
             }
-        }
-        .onChange(of: self.isRewriteModeShortcutEnabled) { newValue in
-            SettingsStore.shared.rewriteModeShortcutEnabled = newValue
-            self.hotkeyManager?.updateRewriteModeShortcutEnabled(newValue)
+            .onChange(of: self.selectedSidebarItem) { _, newValue in
+                self.handleModeTransition(from: self.previousSidebarItem, to: newValue)
+                self.previousSidebarItem = newValue
+            }
+    }
 
-            if !newValue {
-                if self.activeShortcutRecordingTarget == .edit {
-                    self.clearShortcutRecordingMode()
+    private func applyShortcutStateChanges<Content: View>(to view: Content) -> some View {
+        view
+            .onAppear {
+                self.handleContentAppear()
+            }
+            .onChange(of: self.accessibilityEnabled) { _, enabled in
+                if enabled {
+                    self.finishAccessibilityPermissionFlow()
                 }
 
-                if self.activeRecordingMode == .edit {
-                    if self.asr.isRunning {
-                        Task { await self.asr.stopWithoutTranscription() }
-                    }
-                    self.clearActiveRecordingMode()
-                    self.rewriteModeService.clearState()
-                    self.menuBarManager.setOverlayMode(.dictation)
+                if enabled && self.hotkeyManager != nil && !self.hotkeyManagerInitialized {
+                    DebugLogger.shared.debug("Accessibility enabled, reinitializing hotkey manager", source: "ContentView")
+                    self.hotkeyManager?.reinitialize()
                 }
             }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            let trusted = AXIsProcessTrusted()
-            if trusted != self.accessibilityEnabled {
-                self.accessibilityEnabled = trusted
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .openCustomDictionaryFromVoiceEngine)) { _ in
-            self.selectedSidebarItem = .customDictionary
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .appNavigationRequested)) { _ in
-            self.handlePendingAppNavigation()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .settingsBackupDidRestore)) { _ in
-            self.reloadSettingsStateAfterBackupRestore()
-        }
-        .toolbar {
-            if !self.settings.shouldShowOnboarding {
-                ToolbarItem(placement: .primaryAction) {
-                    Button(action: self.openIssueReportingPage) {
-                        Image(systemName: "ladybug.fill")
-                    }
-                    .help("Report an issue")
-                    .accessibilityLabel("Report an issue")
+            .onChange(of: self.selectedModel) { _, newValue in
+                if newValue != "__ADD_MODEL__" {
+                    self.selectedModelByProvider[self.currentProvider] = newValue
+                    SettingsStore.shared.selectedModelByProvider = self.selectedModelByProvider
                 }
             }
+            .onChange(of: self.selectedProviderID) { _, newValue in
+                SettingsStore.shared.selectedProviderID = newValue
+            }
+            .onChange(of: self.activeShortcutRecordingTarget) { _, _ in
+                self.hotkeyManager?.resetModifierOnlyShortcutTracking()
+            }
+            .onChange(of: self.isPromptModeShortcutEnabled) { newValue in
+                self.handlePromptShortcutEnabledChange(newValue)
+            }
+            .onChange(of: self.isCommandModeShortcutEnabled) { newValue in
+                self.handleCommandShortcutEnabledChange(newValue)
+            }
+            .onChange(of: self.isRewriteModeShortcutEnabled) { newValue in
+                self.handleRewriteShortcutEnabledChange(newValue)
+            }
+    }
+
+    private func handlePromptShortcutEnabledChange(_ isEnabled: Bool) {
+        SettingsStore.shared.promptModeShortcutEnabled = isEnabled
+        self.hotkeyManager?.updatePromptModeShortcutEnabled(isEnabled)
+
+        if !isEnabled {
+            if self.activeShortcutRecordingTarget == .secondaryDictation {
+                self.clearShortcutRecordingMode()
+            }
+
+            if self.activeRecordingMode == .promptMode {
+                if self.asr.isRunning {
+                    Task { await self.asr.stopWithoutTranscription() }
+                }
+                self.cancelPrewarmDictationIfNeeded()
+                self.clearActiveRecordingMode()
+                self.menuBarManager.setOverlayMode(.dictation)
+            }
         }
-        .toolbar(removing: .sidebarToggle)
-        .overlay(alignment: .center) {}
-        .alert(
-            self.asr.errorTitle,
-            isPresented: Binding(
-                get: { self.asr.showError },
-                set: { self.asr.showError = $0 }
-            )
-        ) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(self.asr.errorMessage)
+    }
+
+    private func handleCommandShortcutEnabledChange(_ isEnabled: Bool) {
+        SettingsStore.shared.commandModeShortcutEnabled = isEnabled
+        self.hotkeyManager?.updateCommandModeShortcutEnabled(isEnabled)
+
+        if !isEnabled {
+            if self.activeShortcutRecordingTarget == .command {
+                self.clearShortcutRecordingMode()
+            }
+
+            if self.activeRecordingMode == .command {
+                if self.asr.isRunning {
+                    Task { await self.asr.stopWithoutTranscription() }
+                }
+                self.cancelPrewarmDictationIfNeeded()
+                self.clearActiveRecordingMode()
+                self.menuBarManager.setOverlayMode(.dictation)
+            }
         }
-        .onChange(of: self.audioObserver.changeTick) { _, _ in
-            // Hardware change detected → refresh device lists
+    }
+
+    private func handleRewriteShortcutEnabledChange(_ isEnabled: Bool) {
+        SettingsStore.shared.rewriteModeShortcutEnabled = isEnabled
+        self.hotkeyManager?.updateRewriteModeShortcutEnabled(isEnabled)
+
+        if !isEnabled {
+            if self.activeShortcutRecordingTarget == .edit {
+                self.clearShortcutRecordingMode()
+            }
+
+            if self.activeRecordingMode == .edit {
+                if self.asr.isRunning {
+                    Task { await self.asr.stopWithoutTranscription() }
+                }
+                self.cancelPrewarmDictationIfNeeded()
+                self.clearActiveRecordingMode()
+                self.rewriteModeService.clearState()
+                self.menuBarManager.setOverlayMode(.dictation)
+            }
+        }
+    }
+
+    private func handleContentAppear() {
+        self.appear = true
+        self.accessibilityEnabled = self.checkAccessibilityPermissions()
+
+        self.handleMenuBarNavigation(self.menuBarManager.requestedNavigationDestination)
+        if UserDefaults.standard.bool(forKey: self.accessibilityRestartFlagKey) {
+            UserDefaults.standard.set(false, forKey: self.accessibilityRestartFlagKey)
+            self.showRestartPrompt = false
+        }
+
+        if self.accessibilityEnabled {
+            self.finishAccessibilityPermissionFlow()
+        }
+
+        if self.selectedSidebarItem == nil {
+            let isOnboarded = self.asr.isAsrReady || self.asr.modelsExistOnDisk
+            self.selectedSidebarItem = isOnboarded ? .preferences : .welcome
+        }
+        self.handlePendingAppNavigation()
+
+        if !self.accessibilityEnabled {
+            UserDefaults.standard.set(false, forKey: self.hasAutoRestartedForAccessibilityKey)
+        }
+
+        self.menuBarManager.initializeMenuBar()
+        self.scheduleDelayedAudioInitialization()
+        self.configureNotchCallbacks()
+        self.startAccessibilityPolling()
+        self.initializeHotkeyManagerIfNeeded()
+
+        Task {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            await self.preloadASRModel()
+        }
+
+        self.loadProviderState()
+        self.installShortcutCaptureMonitor()
+    }
+
+    private func scheduleDelayedAudioInitialization() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            DebugLogger.shared.info("🚦 Startup delay complete, signaling UI ready...", source: "ContentView")
+            self.appServices.signalUIReady()
+
+            DebugLogger.shared.info("🔊 Starting delayed audio initialization...", source: "ContentView")
+            self.audioObserver.startObserving()
+            self.asr.initialize()
+            self.menuBarManager.configure(asrService: self.appServices.asr)
             self.refreshDevices()
 
-            // Only sync UI with system defaults when sync is enabled
-            // When sync is disabled, keep the user's preferred device selection
-            if SettingsStore.shared.syncAudioDevicesWithSystem {
-                // Sync mode: Update UI to match current system defaults
-                if let sysIn = AudioDevice.getDefaultInputDevice()?.uid {
-                    self.selectedInputUID = sysIn
-                }
-                if let sysOut = AudioDevice.getDefaultOutputDevice()?.uid {
-                    self.selectedOutputUID = sysOut
-                }
-            } else {
-                // Independent mode: Only update if preferred device is no longer available
-                if let prefIn = SettingsStore.shared.preferredInputDeviceUID,
-                   inputDevices.contains(where: { $0.uid == prefIn })
-                {
-                    self.selectedInputUID = prefIn
-                } else if let sysIn = AudioDevice.getDefaultInputDevice()?.uid {
-                    // Fallback to system default if preferred device disconnected
-                    self.selectedInputUID = sysIn
-                    SettingsStore.shared.preferredInputDeviceUID = sysIn
-                }
+            if self.selectedInputUID.isEmpty, let defIn = AudioDevice.getDefaultInputDevice()?.uid {
+                self.selectedInputUID = defIn
+            }
+            if self.selectedOutputUID.isEmpty, let defOut = AudioDevice.getDefaultOutputDevice()?.uid {
+                self.selectedOutputUID = defOut
+            }
 
-                if let prefOut = SettingsStore.shared.preferredOutputDeviceUID,
-                   outputDevices.contains(where: { $0.uid == prefOut })
-                {
-                    self.selectedOutputUID = prefOut
-                } else if let sysOut = AudioDevice.getDefaultOutputDevice()?.uid {
-                    // Fallback to system default if preferred device disconnected
-                    self.selectedOutputUID = sysOut
-                    SettingsStore.shared.preferredOutputDeviceUID = sysOut
-                }
+            if let systemInputUID = AudioDevice.getDefaultInputDevice()?.uid,
+               self.inputDevices.contains(where: { $0.uid == systemInputUID })
+            {
+                self.selectedInputUID = systemInputUID
+            }
+
+            if let prefOut = SettingsStore.shared.preferredOutputDeviceUID,
+               !prefOut.isEmpty,
+               outputDevices.first(where: { $0.uid == prefOut }) != nil
+            {
+                self.selectedOutputUID = prefOut
+            }
+
+            DebugLogger.shared.info("✅ Audio subsystems initialized", source: "ContentView")
+        }
+    }
+
+    private func configureNotchCallbacks() {
+        NotchOverlayManager.shared.onNotchClicked = {
+            guard NotchOverlayManager.shared.canHandleNotchCommandTap else { return }
+            if NotchOverlayManager.shared.canShowExpandedCommandOutput,
+               !NotchContentState.shared.commandConversationHistory.isEmpty
+            {
+                NotchOverlayManager.shared.showExpandedCommandOutput()
             }
         }
-        .onDisappear {
-            Task { await self.asr.stopWithoutTranscription() }
-            // Note: Overlay lifecycle is now managed by MenuBarManager
-            // Note: NotchContentState handlers capture self (a struct value copy) and are
-            // intentionally kept alive so the overlay remains fully functional when the
-            // settings window is closed. No retain cycle risk since ContentView is a value type.
 
-            // Stop accessibility polling
-            self.accessibilityPollingTask?.cancel()
-            self.accessibilityPollingTask = nil
+        NotchOverlayManager.shared.onCommandFollowUp = { [weak commandModeService] text in
+            guard NotchOverlayManager.shared.allowsCommandNotchActions else { return }
+            await commandModeService?.processFollowUpCommand(text)
         }
-        .onChange(of: self.hotkeyShortcut) { _, newValue in
-            DebugLogger.shared.debug("Hotkey shortcut changed to \(newValue.displayString)", source: "ContentView")
-            self.hotkeyManager?.updateShortcut(newValue)
 
-            // Update initialization status after shortcut change
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self.hotkeyManagerInitialized = self.hotkeyManager?.validateEventTapHealth() ?? false
-                DebugLogger.shared.debug(
-                    "Hotkey manager initialized: \(self.hotkeyManagerInitialized)",
-                    source: "ContentView"
+        NotchOverlayManager.shared.onNewChat = { [weak commandModeService] in
+            guard NotchOverlayManager.shared.allowsCommandNotchActions else { return }
+            commandModeService?.createNewChat()
+        }
+
+        NotchOverlayManager.shared.onSwitchChat = { [weak commandModeService] chatID in
+            guard NotchOverlayManager.shared.allowsCommandNotchActions else { return }
+            commandModeService?.switchToChat(id: chatID)
+        }
+
+        NotchOverlayManager.shared.onClearChat = { [weak commandModeService] in
+            guard NotchOverlayManager.shared.allowsCommandNotchActions else { return }
+            commandModeService?.deleteCurrentChat()
+        }
+    }
+
+    private func loadProviderState() {
+        self.selectedProviderID = SettingsStore.shared.selectedProviderID
+        self.updateCurrentProvider()
+
+        self.enableDebugLogs = SettingsStore.shared.enableDebugLogs
+        self.availableModelsByProvider = SettingsStore.shared.availableModelsByProvider
+        self.selectedModelByProvider = SettingsStore.shared.selectedModelByProvider
+        self.providerAPIKeys = SettingsStore.shared.providerAPIKeys
+        self.savedProviders = SettingsStore.shared.savedProviders
+
+        var normalized: [String: [String]] = [:]
+        for (key, models) in self.availableModelsByProvider {
+            let lower = key.lowercased()
+            let newKey = ModelRepository.shared.isBuiltIn(lower) ? lower : (key.hasPrefix("custom:") ? key : "custom:\(key)")
+            let clean = Array(Set(models.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) })).sorted()
+            if !clean.isEmpty {
+                normalized[newKey] = clean
+            }
+        }
+        self.availableModelsByProvider = normalized
+        SettingsStore.shared.availableModelsByProvider = normalized
+
+        var normalizedSel: [String: String] = [:]
+        for (key, model) in self.selectedModelByProvider {
+            let lower = key.lowercased()
+            let newKey = ModelRepository.shared.isBuiltIn(lower) ? lower : (key.hasPrefix("custom:") ? key : "custom:\(key)")
+            if let list = normalized[newKey], list.contains(model) {
+                normalizedSel[newKey] = model
+            }
+        }
+        self.selectedModelByProvider = normalizedSel
+        SettingsStore.shared.selectedModelByProvider = normalizedSel
+
+        if let saved = savedProviders.first(where: { $0.id == selectedProviderID }) {
+            self.availableModels = saved.models
+            self.openAIBaseURL = saved.baseURL
+        } else if let stored = availableModelsByProvider[currentProvider], !stored.isEmpty {
+            self.availableModels = stored
+        } else {
+            self.availableModels = ModelRepository.shared.defaultModels(for: self.providerKey(for: self.selectedProviderID))
+        }
+
+        if let sel = selectedModelByProvider[currentProvider], availableModels.contains(sel) {
+            self.selectedModel = sel
+        } else if let first = availableModels.first {
+            self.selectedModel = first
+        }
+    }
+
+    private func installShortcutCaptureMonitor() {
+        NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
+            self.handleShortcutCaptureEvent(event)
+        }
+    }
+
+    private func handleShortcutCaptureEvent(_ event: NSEvent) -> NSEvent? {
+        let eventModifiers = event.modifierFlags.intersection([.function, .command, .option, .control, .shift])
+        let isRecordingAnyShortcut = self.isRecordingAnyShortcutCapture
+        let recordingTarget = self.activeShortcutRecordingTarget
+
+        if event.type == .keyDown {
+            return self.handleShortcutKeyDownEvent(event, modifiers: eventModifiers, isRecordingAnyShortcut: isRecordingAnyShortcut, recordingTarget: recordingTarget)
+        } else if event.type == .flagsChanged {
+            return self.handleShortcutFlagsChangedEvent(event, modifiers: eventModifiers, isRecordingAnyShortcut: isRecordingAnyShortcut, recordingTarget: recordingTarget)
+        }
+
+        return event
+    }
+
+    private func handleShortcutKeyDownEvent(
+        _ event: NSEvent,
+        modifiers eventModifiers: NSEvent.ModifierFlags,
+        isRecordingAnyShortcut: Bool,
+        recordingTarget: ShortcutRecordingTarget?
+    ) -> NSEvent? {
+        guard isRecordingAnyShortcut else {
+            if self.cancelRecordingHotkeyShortcut.matches(keyCode: event.keyCode, modifiers: eventModifiers),
+               self.handleCancelShortcut()
+            {
+                return nil
+            }
+            self.shortcutRecordingMessage = nil
+            self.resetPendingShortcutState()
+            return event
+        }
+
+        let keyCode = event.keyCode
+        if keyCode == 53, recordingTarget != .cancel {
+            DebugLogger.shared.debug("NSEvent monitor: Escape pressed, cancelling shortcut recording", source: "ContentView")
+            self.clearShortcutRecordingMode()
+            return nil
+        }
+
+        let newShortcut = HotkeyShortcut(keyCode: keyCode, modifierFlags: self.pendingModifierFlags.union(eventModifiers))
+        DebugLogger.shared.debug("NSEvent monitor: Recording new shortcut: \(newShortcut.displayString)", source: "ContentView")
+
+        if let recordingTarget,
+           let conflictMessage = self.shortcutConflictMessage(for: newShortcut, target: recordingTarget)
+        {
+            self.shortcutRecordingMessage = conflictMessage
+            self.resetPendingShortcutState()
+            DebugLogger.shared.debug("NSEvent monitor: Shortcut conflict while recording: \(conflictMessage)", source: "ContentView")
+            return nil
+        }
+
+        self.shortcutRecordingMessage = nil
+        if let recordingTarget {
+            self.assignRecordedShortcut(newShortcut, to: recordingTarget)
+        }
+        self.resetPendingShortcutState()
+        DebugLogger.shared.debug("NSEvent monitor: Finished recording shortcut", source: "ContentView")
+        return nil
+    }
+
+    private func handleShortcutFlagsChangedEvent(
+        _ event: NSEvent,
+        modifiers eventModifiers: NSEvent.ModifierFlags,
+        isRecordingAnyShortcut: Bool,
+        recordingTarget: ShortcutRecordingTarget?
+    ) -> NSEvent? {
+        guard isRecordingAnyShortcut else {
+            self.shortcutRecordingMessage = nil
+            self.resetPendingShortcutState()
+            return event
+        }
+
+        let changedModifierFlag = HotkeyShortcut.modifierFlag(forKeyCode: event.keyCode)
+
+        if eventModifiers.isEmpty {
+            if self.pendingModifierOnly, let modifierKeyCode = pendingModifierKeyCode {
+                let newShortcut = HotkeyShortcut(
+                    keyCode: modifierKeyCode,
+                    modifierFlags: self.pendingModifierFlags,
+                    modifierKeyCodes: Array(self.pendingModifierKeyCodes)
                 )
+                DebugLogger.shared.debug("NSEvent monitor: Recording modifier-only shortcut: \(newShortcut.displayString)", source: "ContentView")
+
+                if let recordingTarget,
+                   let conflictMessage = self.shortcutConflictMessage(for: newShortcut, target: recordingTarget)
+                {
+                    self.shortcutRecordingMessage = conflictMessage
+                    self.resetPendingShortcutState()
+                    DebugLogger.shared.debug("NSEvent monitor: Modifier shortcut conflict while recording: \(conflictMessage)", source: "ContentView")
+                    return nil
+                }
+
+                self.shortcutRecordingMessage = nil
+                if let recordingTarget {
+                    self.assignRecordedShortcut(newShortcut, to: recordingTarget)
+                }
+                self.resetPendingShortcutState()
+                DebugLogger.shared.debug("NSEvent monitor: Finished recording modifier shortcut", source: "ContentView")
+                return nil
+            }
+
+            self.resetPendingShortcutState()
+            DebugLogger.shared.debug("NSEvent monitor: Modifiers released without recording, continuing to wait", source: "ContentView")
+            return nil
+        }
+
+        if let changedModifierFlag {
+            let isRelease = self.currentRecordingModifierKeyCodes.contains(event.keyCode)
+
+            if isRelease {
+                self.currentRecordingModifierKeyCodes.remove(event.keyCode)
+            } else if eventModifiers.contains(changedModifierFlag) {
+                self.currentRecordingModifierKeyCodes.insert(event.keyCode)
+                self.pendingModifierKeyCodes.insert(event.keyCode)
+                self.pendingModifierFlags = self.pendingModifierFlags.union(eventModifiers)
+                self.pendingModifierKeyCode = event.keyCode
+                self.pendingModifierOnly = true
+                DebugLogger.shared.debug("NSEvent monitor: Modifier key pressed during recording, pending modifiers: \(self.pendingModifierFlags)", source: "ContentView")
             }
         }
-        .onChange(of: self.selectedSidebarItem) { _, newValue in
-            self.handleModeTransition(from: self.previousSidebarItem, to: newValue)
-            self.previousSidebarItem = newValue
-        }
+        return nil
     }
 
     // MARK: - Analytics helpers
@@ -841,6 +895,24 @@ struct ContentView: View {
             if configuredShortcut == shortcut {
                 return "Duplicate with \(otherTarget.title)"
             }
+            if shortcut.conflictsWith(configuredShortcut) {
+                return "Overlaps \(otherTarget.title) — use a different modifier key"
+            }
+        }
+
+        let targetPromptKey = target.promptConfigurationKey
+        for assignment in SettingsStore.shared.dictationPromptShortcutAssignments() {
+            guard let key = SettingsStore.shared.dictationPromptConfigurationKey(for: assignment.selection),
+                  key != targetPromptKey
+            else {
+                continue
+            }
+            if assignment.shortcut == shortcut {
+                return "Duplicate with Prompt Shortcut"
+            }
+            if shortcut.conflictsWith(assignment.shortcut) {
+                return "Overlaps Prompt Shortcut — use a different modifier key"
+            }
         }
 
         return nil
@@ -875,6 +947,18 @@ struct ContentView: View {
         case .cancel:
             self.cancelRecordingHotkeyShortcut = shortcut
             SettingsStore.shared.cancelRecordingHotkeyShortcut = shortcut
+        case let .dictationPrompt(key):
+            guard let selection = SettingsStore.shared.dictationPromptSelection(forConfigurationKey: key) else { return }
+            var configuration = SettingsStore.shared.dictationPromptConfiguration(for: selection)
+            configuration.shortcut = shortcut
+            SettingsStore.shared.setDictationPromptConfiguration(configuration, for: selection)
+            self.hotkeyManager?.updatePromptShortcutAssignments(SettingsStore.shared.dictationPromptShortcutAssignments())
+        case .newPrompt:
+            NotificationCenter.default.post(
+                name: .newPromptShortcutRecorded,
+                object: nil,
+                userInfo: ["shortcut": shortcut]
+            )
         }
     }
 
@@ -892,7 +976,7 @@ struct ContentView: View {
             self.isRewriteModeShortcutEnabled = enabled
             SettingsStore.shared.rewriteModeShortcutEnabled = enabled
             self.hotkeyManager?.updateRewriteModeShortcutEnabled(enabled)
-        case .primaryDictation, .cancel:
+        case .primaryDictation, .cancel, .dictationPrompt, .newPrompt:
             break
         }
     }
@@ -918,138 +1002,87 @@ struct ContentView: View {
 
     private var sidebarView: some View {
         List(selection: self.$selectedSidebarItem) {
-            // Priority section: Welcome (if not onboarded) or Preferences (if voice model ready)
-            // Voice model readiness is the key onboarding milestone; AI enhancement is optional
-            let isOnboarded = self.asr.isAsrReady || self.asr.modelsExistOnDisk
-            if !isOnboarded {
-                NavigationLink(value: SidebarItem.welcome) {
-                    Label("Welcome", systemImage: "house.fill")
-                        .font(.system(size: 15, weight: .medium))
-                }
-                .listRowBackground(self.sidebarRowBackground(for: .welcome))
-            } else {
-                NavigationLink(value: SidebarItem.preferences) {
-                    Label("Preferences", systemImage: "gearshape.fill")
-                        .font(.system(size: 15, weight: .medium))
-                }
-                .listRowBackground(self.sidebarRowBackground(for: .preferences))
+            Section {
+                self.sidebarNavigationLink(.preferences, title: "Settings", systemImage: "gearshape.fill")
+                self.sidebarNavigationLink(.voiceEngine, title: "Voice Engine", systemImage: "waveform")
+                self.sidebarNavigationLink(.aiEnhancements, title: "AI Enhancement", systemImage: "brain")
+                self.sidebarNavigationLink(.customDictionary, title: "Custom Dictionary", systemImage: "text.book.closed.fill")
+            } header: {
+                self.sidebarSectionHeader("Configure")
             }
 
-            Button(action: {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    self.aiSettingsExpanded.toggle()
-                }
-            }) {
-                HStack {
-                    Label("AI Settings", systemImage: "sparkles")
-                        .font(.system(size: 15, weight: .medium))
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .rotationEffect(.degrees(self.aiSettingsExpanded ? 90 : 0))
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if self.aiSettingsExpanded {
-                NavigationLink(value: SidebarItem.voiceEngine) {
-                    Label("Voice Engine", systemImage: "waveform")
-                        .font(.system(size: 15, weight: .medium))
-                        .padding(.leading, 18)
-                }
-                .listRowBackground(self.sidebarRowBackground(for: .voiceEngine))
-
-                NavigationLink(value: SidebarItem.aiEnhancements) {
-                    Label("AI Enhancement", systemImage: "brain")
-                        .font(.system(size: 15, weight: .medium))
-                        .padding(.leading, 18)
-                }
-                .listRowBackground(self.sidebarRowBackground(for: .aiEnhancements))
+            Section {
+                self.sidebarNavigationLink(.commandMode, title: "Command Mode", systemImage: "terminal.fill")
+                self.sidebarNavigationLink(.meetingTools, title: "File Transcription", systemImage: "doc.text.fill")
+            } header: {
+                self.sidebarSectionHeader("Use")
             }
 
-            // If NOT onboarded, Preferences comes here (below AI Settings)
-            if !isOnboarded {
-                NavigationLink(value: SidebarItem.preferences) {
-                    Label("Preferences", systemImage: "gearshape.fill")
-                        .font(.system(size: 15, weight: .medium))
-                }
-                .listRowBackground(self.sidebarRowBackground(for: .preferences))
+            Section {
+                self.sidebarNavigationLink(.history, title: "History", systemImage: "clock.arrow.circlepath")
+                self.sidebarNavigationLink(.stats, title: "Stats", systemImage: "chart.bar.fill")
+            } header: {
+                self.sidebarSectionHeader("Activity")
             }
 
-            NavigationLink(value: SidebarItem.commandMode) {
-                Label("Command Mode", systemImage: "terminal.fill")
-                    .font(.system(size: 15, weight: .medium))
-            }
-            .listRowBackground(self.sidebarRowBackground(for: .commandMode))
-
-            NavigationLink(value: SidebarItem.meetingTools) {
-                Label("File Transcription", systemImage: "doc.text.fill")
-                    .font(.system(size: 15, weight: .medium))
-            }
-            .listRowBackground(self.sidebarRowBackground(for: .meetingTools))
-
-            NavigationLink(value: SidebarItem.customDictionary) {
-                Label("Custom Dictionary", systemImage: "text.book.closed.fill")
-                    .font(.system(size: 15, weight: .medium))
-            }
-            .listRowBackground(self.sidebarRowBackground(for: .customDictionary))
-
-            NavigationLink(value: SidebarItem.stats) {
-                Label("Stats", systemImage: "chart.bar.fill")
-                    .font(.system(size: 15, weight: .medium))
-            }
-            .listRowBackground(self.sidebarRowBackground(for: .stats))
-
-            NavigationLink(value: SidebarItem.history) {
-                Label("History", systemImage: "clock.arrow.circlepath")
-                    .font(.system(size: 15, weight: .medium))
-            }
-            .listRowBackground(self.sidebarRowBackground(for: .history))
-
-            NavigationLink(value: SidebarItem.feedback) {
-                Label("Feedback", systemImage: "envelope.fill")
-                    .font(.system(size: 15, weight: .medium))
-            }
-            .listRowBackground(self.sidebarRowBackground(for: .feedback))
-
-            // If onboarded, "Getting Started" comes at the bottom
-            if isOnboarded {
-                NavigationLink(value: SidebarItem.welcome) {
-                    Label("Getting Started", systemImage: "house.fill")
-                        .font(.system(size: 15, weight: .medium))
-                }
-                .listRowBackground(self.sidebarRowBackground(for: .welcome))
+            Section {
+                self.sidebarNavigationLink(.welcome, title: "Getting Started", systemImage: "house.fill")
+                self.sidebarNavigationLink(.feedback, title: "Feedback", systemImage: "envelope.fill")
+            } header: {
+                self.sidebarSectionHeader("Help")
             }
         }
         .listStyle(.sidebar)
         .animation(nil, value: self.selectedSidebarItem)
         .navigationTitle("FluidVoice")
-        .scrollContentBackground(.hidden)
-        .background {
-            ZStack {
-                self.theme.palette.sidebarBackground
-                Rectangle().fill(self.theme.materials.sidebar)
-            }
-            .ignoresSafeArea()
-        }
         .tint(self.theme.palette.accent)
     }
 
-    private func sidebarRowBackground(for item: SidebarItem) -> some View {
-        return Color.clear
+    private func sidebarSectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(self.theme.typography.sidebarSection)
+            .foregroundStyle(.secondary)
+            .textCase(nil)
+            .padding(.top, self.theme.metrics.spacing.sm)
+            .padding(.bottom, self.theme.metrics.spacing.xs)
+    }
+
+    private func sidebarNavigationLink(_ item: SidebarItem, title: String, systemImage: String) -> some View {
+        NavigationLink(value: item) {
+            Label(title, systemImage: systemImage)
+                .font(self.theme.typography.sidebarItem)
+                .frame(minHeight: 24, alignment: .leading)
+                .padding(.vertical, self.theme.metrics.spacing.xs / 2)
+        }
+    }
+
+    private var themePreferenceButton: some View {
+        Button {
+            self.settings.themePreference = self.nextThemePreference(after: self.settings.themePreference)
+        } label: {
+            Image(systemName: self.settings.themePreference.systemImageName)
+        }
+        .help("Theme: \(self.settings.themePreference.displayName)")
+        .accessibilityLabel("Theme")
+    }
+
+    private func nextThemePreference(after preference: SettingsStore.ThemePreference) -> SettingsStore.ThemePreference {
+        switch preference {
+        case .system: return .light
+        case .light: return .dark
+        case .dark: return .system
+        }
+    }
+
+    private var todayStatsButton: some View {
+        TodayStatsToolbarButton(typingWPM: self.settings.userTypingWPM) {
+            self.selectedSidebarItem = .stats
+        }
     }
 
     private var detailView: some View {
         ZStack {
-            self.theme.palette.windowBackground
-                .opacity(0.98)
-                .ignoresSafeArea()
-
-            Rectangle()
-                .fill(self.theme.materials.window)
-                .opacity(0.75)
+            Color(nsColor: .windowBackgroundColor)
                 .ignoresSafeArea()
 
             self.detailContent
@@ -1071,7 +1104,9 @@ struct ContentView: View {
         case .aiEnhancements:
             return AnyView(AIEnhancementSettingsScreen(
                 menuBarManager: self.menuBarManager,
-                theme: self.theme
+                theme: self.theme,
+                activeShortcutRecordingTarget: self.$activeShortcutRecordingTarget,
+                shortcutRecordingMessage: self.$shortcutRecordingMessage
             ))
         case .preferences:
             return AnyView(self.preferencesView)
@@ -1099,21 +1134,25 @@ struct ContentView: View {
                 set: { self.settings.onboardingCurrentStep = $0 }
             ),
             accessibilityEnabled: self.accessibilityEnabled,
+            accessibilitySetupInProgress: self.didOpenAccessibilityPane,
             markAISkipped: {
                 self.settings.onboardingAISkipped = true
                 self.settings.setDictationPromptSelection(.off)
             },
-            markPlaygroundValidated: {
-                self.settings.onboardingPlaygroundValidated = true
-                self.settings.playgroundUsed = true
-                self.playgroundUsed = true
-            },
             finishOnboarding: {
                 self.completeOnboardingIfPossible()
+            },
+            finishOnboardingAtGettingStarted: {
+                self.completeOnboardingIfPossible(selecting: .welcome)
+            },
+            openAIEnhancementSettingsFromOnboarding: {
+                self.completeOnboardingForAIProviderSetup()
             },
             openAccessibilitySettings: self.openAccessibilitySettings,
             restartApp: self.restartApp,
             menuBarManager: self.menuBarManager,
+            activeShortcutRecordingTarget: self.$activeShortcutRecordingTarget,
+            shortcutRecordingMessage: self.$shortcutRecordingMessage,
             theme: self.theme
         )
         .environmentObject(self.appServices)
@@ -1151,7 +1190,7 @@ struct ContentView: View {
 
                     if self.asr.micStatus != .authorized {
                         Text("Microphone access is required for voice recording")
-                            .font(.caption)
+                            .font(self.theme.typography.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -1165,6 +1204,14 @@ struct ContentView: View {
                 self.microphoneInstructionsView
             }
         }
+    }
+
+    private var windowSizing: FluidWindowSizing {
+        let window = self.theme.metrics.window
+        if self.settings.shouldShowOnboarding {
+            return .minimum(width: window.onboardingMinWidth, height: window.onboardingMinHeight)
+        }
+        return .minimum(width: window.mainMinWidth, height: window.mainMinHeight)
     }
 
     private var microphoneActionButton: some View {
@@ -1202,9 +1249,9 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 Image(systemName: "info.circle.fill")
                     .foregroundStyle(self.theme.palette.accent)
-                    .font(.caption)
+                    .font(self.theme.typography.caption)
                 Text("How to enable microphone access:")
-                    .font(.caption)
+                    .font(self.theme.typography.caption)
                     .fontWeight(.medium)
                     .foregroundStyle(.secondary)
             }
@@ -1229,12 +1276,12 @@ struct ContentView: View {
     private func instructionStep(number: String, text: String) -> some View {
         HStack(spacing: 8) {
             Text(number + ".")
-                .font(.caption2)
+                .font(self.theme.typography.captionSmall)
                 .foregroundStyle(self.theme.palette.accent)
                 .fontWeight(.semibold)
                 .frame(width: 16)
             Text(text)
-                .font(.caption)
+                .font(self.theme.typography.caption)
                 .foregroundStyle(.primary)
         }
     }
@@ -1253,8 +1300,6 @@ struct ContentView: View {
             hotkeyShortcut: self.$hotkeyShortcut,
             activeShortcutRecordingTarget: self.$activeShortcutRecordingTarget,
             shortcutRecordingMessage: self.$shortcutRecordingMessage,
-            promptModeShortcut: self.$promptModeHotkeyShortcut,
-            promptModeShortcutEnabled: self.$isPromptModeShortcutEnabled,
             commandModeShortcut: self.$commandModeHotkeyShortcut,
             rewriteShortcut: self.$rewriteModeHotkeyShortcut,
             cancelRecordingShortcut: self.$cancelRecordingHotkeyShortcut,
@@ -1333,11 +1378,14 @@ struct ContentView: View {
     // MARK: - Provider Management Functions
 
     private func providerKey(for providerID: String) -> String {
+        let trimmed = providerID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+
         // Built-in providers use their ID directly
-        if ModelRepository.shared.isBuiltIn(providerID) { return providerID }
+        if ModelRepository.shared.isBuiltIn(trimmed) { return trimmed }
         // Saved providers use their stable id with "custom:" prefix (if not already present)
-        if providerID.hasPrefix("custom:") { return providerID }
-        return providerID.isEmpty ? self.currentProvider : "custom:\(providerID)"
+        if trimmed.hasPrefix("custom:") { return trimmed }
+        return "custom:\(trimmed)"
     }
 
     private func updateCurrentProvider() {
@@ -1402,6 +1450,17 @@ struct ContentView: View {
             "Captured recording app context: app=\(info.name), bundleId=\(info.bundleId), title=\(info.windowTitle)",
             source: "ContentView"
         )
+
+        // Capture text before the caret only when formatting needs focused-field context.
+        if SettingsStore.shared.needsDictationFormattingContext {
+            self.recordingPrecedingText = TypingService.textBeforeCursorInFocusedField()
+            DebugLogger.shared.debug(
+                "Captured preceding text for continuous dictation (chars=\(self.recordingPrecedingText.count))",
+                source: "ContentView"
+            )
+        } else {
+            self.recordingPrecedingText = ""
+        }
     }
 
     private func resolveTypingTargetPID() -> (pid: pid_t?, shouldRestoreOriginalFocus: Bool) {
@@ -1570,11 +1629,61 @@ struct ContentView: View {
             derivedSelectedModel = storedSelectedModelByProvider[currentSelectedProviderID] ?? ""
         }
 
+        guard !derivedCurrentProvider.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AIProcessingError.noVerifiedProvider
+        }
+        if currentSelectedProviderID != "apple-intelligence",
+           derivedSelectedModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            throw AIProcessingError.missingModel(provider: derivedCurrentProvider)
+        }
+
         DebugLogger.shared.debug("processTextWithAI using provider=\(derivedCurrentProvider), model=\(derivedSelectedModel)", source: "ContentView")
+
+        let appInfo = self.recordingAppInfo ?? self.getCurrentAppInfo()
+        let isDictationCall = overrideSystemPrompt != nil || dictationSlot != nil
+        let isPrivateAIProvider = currentSelectedProviderID == PrivateAIProviderFeature.shared.providerID ||
+            derivedCurrentProvider == PrivateAIProviderFeature.shared.providerID ||
+            derivedCurrentProvider == "custom:\(PrivateAIProviderFeature.shared.providerID)"
+        let usePrivateAIProvider = overrideSystemPrompt == nil &&
+            isDictationCall &&
+            (isPrivateAIProvider || PrivateAIIntegrationService.shouldHandleDictation(model: derivedSelectedModel))
+
+        if usePrivateAIProvider {
+            if self.shouldTracePromptProcessing {
+                self.logDictationPromptTrace("Private AI Provider task", value: "dictationEnhancement")
+                self.logDictationPromptTrace("Input transcription (Q)", value: inputText)
+                self.logDictationPromptTrace("Selected context text", value: "<none (dictation mode)>")
+            }
+
+            let apiKey = storedProviderAPIKeys[derivedCurrentProvider] ?? storedProviderAPIKeys[currentSelectedProviderID] ?? ""
+            let response = try await PrivateAIIntegrationService.shared.enhanceDictation(
+                inputText,
+                runtime: PrivateAIIntegrationService.RuntimeConfiguration(
+                    selectedProviderID: currentSelectedProviderID,
+                    providerKey: derivedCurrentProvider,
+                    baseURL: derivedBaseURL,
+                    model: derivedSelectedModel,
+                    apiKey: apiKey,
+                    localModelPath: PrivateAIIntegrationService.configuredLocalModelPath,
+                    usesStablePromptPrefixKVCache: SettingsStore.shared.privateAIPrefixKVCacheEnabled
+                ),
+                context: PrivateAIIntegrationService.AppContext(
+                    appName: appInfo.name,
+                    bundleID: appInfo.bundleId,
+                    windowTitle: appInfo.windowTitle,
+                    appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+                )
+            )
+
+            if self.shouldTracePromptProcessing {
+                self.logDictationPromptTrace("Model answer (A)", value: response.outputText)
+            }
+            return response.outputText
+        }
 
         // Resolve the effective prompt once so every provider path honors
         // transient overrides such as "Transcribe with Prompt".
-        let appInfo = self.recordingAppInfo ?? self.getCurrentAppInfo()
         let promptText: String = {
             let override = overrideSystemPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !override.isEmpty { return override }
@@ -1586,8 +1695,6 @@ struct ContentView: View {
         // the transcript after a blank line). Non-dictation callers — the AI
         // chat tab specifically — keep the legacy two-message layout where
         // the prompt is the system turn and the input is the user turn.
-        let isDictationCall = overrideSystemPrompt != nil || dictationSlot != nil
-
         let systemPrompt: String
         let userMessageContent: String
         if isDictationCall {
@@ -1773,6 +1880,7 @@ struct ContentView: View {
     private func stopAndProcessTranscription(route: DictationOutputRoute = .normal) async {
         DebugLogger.shared.debug("stopAndProcessTranscription called", source: "ContentView")
         DebugLogger.shared.info("Output route selected: \(route.rawValue)", source: "ContentView")
+        self.appBench("stop_path_enter route=\(route.rawValue)")
 
         // Check if we're in rewrite or command mode
         let modeAtStop = self.activeRecordingMode
@@ -1791,8 +1899,10 @@ struct ContentView: View {
         // The asr.stop() call performs the final transcription which can take a moment
         // (especially for slower models like Whisper Medium/Large).
         DebugLogger.shared.debug("Showing transcription processing state", source: "ContentView")
+        self.appBench("processing_ui_request status=Transcribing")
         self.menuBarManager.setProcessing(true)
         NotchOverlayManager.shared.updateTranscriptionText("Transcribing")
+        self.appBench("processing_ui_requested status=Transcribing")
 
         // Give SwiftUI a chance to render the processing state before we do heavier work
         // (ASR finalization + optional AI post-processing).
@@ -1800,7 +1910,16 @@ struct ContentView: View {
 
         // Stop the ASR service and wait for transcription to complete
         // The processing indicator will stay visible during this phase
-        let transcribedText = await asr.stop()
+        let asrStopStartedAt = ProcessInfo.processInfo.systemUptime
+        self.appBench("asr_stop_call")
+        // Play the stop cue as soon as the audio engine has stopped, before the
+        // (potentially slow) final transcription pass. Scoped to dictation only —
+        // Command/Edit modes call asr.stop() without this callback.
+        let transcribedText = await asr.stop(onCaptureStopped: {
+            TranscriptionSoundPlayer.shared.playStopSound()
+        })
+        self.appBench("asr_stop_return elapsedMs=\(Int(((ProcessInfo.processInfo.systemUptime - asrStopStartedAt) * 1000).rounded()))")
+        let audioSnapshot = self.asr.consumeLastCompletedAudioSnapshot()
         DebugLogger.shared.info(
             "Stop transcription result | chars=\(transcribedText.count) | empty=\(transcribedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)",
             source: "ContentView"
@@ -1884,6 +2003,7 @@ struct ContentView: View {
 
         var finalText: String
         var aiFallbackReason: String?
+        var postProcessingModel: String?
         let appInfo = self.recordingAppInfo ?? self.getCurrentAppInfo()
 
         let shouldUseAI = activeDictationSlot.map {
@@ -1894,11 +2014,14 @@ struct ContentView: View {
         if shouldUseAI {
             DebugLogger.shared.debug("Routing transcription through AI post-processing", source: "ContentView")
             let postProcessingModelInfo = self.currentDictationAIModelInfo()
+            postProcessingModel = postProcessingModelInfo.model
             let postProcessingInputChars = transcribedText.count
             let postProcessingStart = Date()
 
             // Update overlay text to show we're now refining (processing already true)
+            self.appBench("processing_ui_request status=Refining")
             NotchOverlayManager.shared.updateTranscriptionText("Refining")
+            self.appBench("processing_ui_requested status=Refining")
 
             // Ensure the status label becomes visible immediately.
             await Task.yield()
@@ -1917,7 +2040,17 @@ struct ContentView: View {
                     source: "ContentView"
                 )
                 aiFallbackReason = error.localizedDescription
-                NotificationService.showAIProcessingFallback(error: error.localizedDescription)
+                // Configuration errors are actionable — point the user at settings
+                // rather than just echoing the technical error string.
+                if let aiError = error as? AIProcessingError,
+                   aiError.isConfigurationError
+                {
+                    NotificationService.showAIProcessingFallback(
+                        error: "\(aiError.localizedDescription). Open AI Enhancement settings to configure a provider."
+                    )
+                } else {
+                    NotificationService.showAIProcessingFallback(error: error.localizedDescription)
+                }
                 finalText = transcribedText
             }
             let postProcessingLatencyMs = Int((Date().timeIntervalSince(postProcessingStart) * 1000).rounded())
@@ -1948,9 +2081,24 @@ struct ContentView: View {
         // Apply GAAV formatting as the FINAL step (after AI post-processing)
         // This ensures the user's preference for no capitalization/period is respected
         finalText = ASRService.applyGAAVFormatting(finalText)
+        // Apply Continuous Dictation Mode after GAAV so smart caps use the field
+        // context captured at recording start, and the trailing space enables chaining.
+        finalText = ASRService.applyContinuousDictationFormatting(finalText, precedingText: self.recordingPrecedingText)
+        self.recordingPrecedingText = ""
         self.asr.finalText = finalText
+        if route == .onboardingSandbox,
+           self.isOnboardingVoicePlaygroundStepActive,
+           !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            self.settings.onboardingPlaygroundValidated = true
+            self.settings.playgroundUsed = true
+            self.playgroundUsed = true
+        }
 
         DebugLogger.shared.info("Transcription finalized (chars: \(finalText.count))", source: "ContentView")
+        let finalTextReadyAt = ProcessInfo.processInfo.systemUptime
+        self.appBench("transcription_finalized chars=\(finalText.count)")
+        self.appBench("text_ready chars=\(finalText.count)")
 
         AnalyticsService.shared.capture(
             .transcriptionCompleted,
@@ -1978,13 +2126,32 @@ struct ContentView: View {
 
         // Save to transcription history (transcription mode only, if enabled)
         if shouldPersistOutputs, SettingsStore.shared.saveTranscriptionHistory {
+            let historyEntryID = UUID()
+            let historyTimestamp = Date()
             TranscriptionHistoryStore.shared.addEntry(
+                id: historyEntryID,
+                timestamp: historyTimestamp,
                 rawText: transcribedText,
                 processedText: finalText,
                 appName: appInfo.name,
                 windowTitle: appInfo.windowTitle,
+                wasAIProcessed: postProcessingModel != nil && aiFallbackReason == nil,
+                processingModel: postProcessingModel,
                 aiProcessingError: aiFallbackReason
             )
+            self.persistDictationAudioIfNeeded(
+                audioSnapshot,
+                entryID: historyEntryID,
+                timestamp: historyTimestamp,
+                model: transcriptionModelInfo.model
+            )
+        }
+        let shouldShowAIProcessingFailure = shouldPersistOutputs && aiFallbackReason != nil
+        if shouldShowAIProcessingFailure {
+            self.pendingAIReprocessText = transcribedText
+            NotchContentState.shared.showAIProcessingFailure()
+        } else {
+            self.pendingAIReprocessText = nil
         }
 
         // When FluidVoice itself is frontmost, the bound editor already receives `finalText`.
@@ -2019,9 +2186,13 @@ struct ContentView: View {
             if typingTarget.shouldRestoreOriginalFocus {
                 await self.restoreFocusToRecordingTarget()
             }
+            self.appBench(
+                "text_ready_to_type_request elapsedMs=\(Int(((ProcessInfo.processInfo.systemUptime - finalTextReadyAt) * 1000).rounded()))"
+            )
             self.asr.typeTextToActiveField(
                 finalText,
-                preferredTargetPID: typingTarget.pid
+                preferredTargetPID: typingTarget.pid,
+                textReadyAt: finalTextReadyAt
             )
             didTypeExternally = true
         }
@@ -2047,7 +2218,9 @@ struct ContentView: View {
                 aiProvider: modelInfo.provider
             )
 
-            NotchOverlayManager.shared.hide()
+            if !shouldShowAIProcessingFailure {
+                NotchOverlayManager.shared.hide()
+            }
         } else if shouldPersistOutputs,
                   SettingsStore.shared.copyTranscriptionToClipboard == false,
                   SettingsStore.shared.saveTranscriptionHistory
@@ -2061,24 +2234,81 @@ struct ContentView: View {
             )
         }
 
-        if !didTypeExternally {
+        if !didTypeExternally, !shouldShowAIProcessingFailure {
             NotchOverlayManager.shared.hide()
         }
     }
 
-    private func currentDictationOutputRouteForHotkeyStop() -> DictationOutputRoute {
+    private func persistDictationAudioIfNeeded(
+        _ snapshot: DictationAudioSnapshot?,
+        entryID: UUID,
+        timestamp: Date,
+        model: String
+    ) {
+        guard SettingsStore.shared.saveTranscriptionHistory,
+              SettingsStore.shared.saveAudioWithTranscriptionHistory,
+              let snapshot = snapshot
+        else {
+            return
+        }
+
+        Task.detached(priority: .utility) {
+            let result: (metadata: DictationAudioMetadata?, error: String?) = {
+                do {
+                    let metadata = try DictationAudioHistoryStore.shared.save(
+                        snapshot: snapshot,
+                        entryID: entryID,
+                        timestamp: timestamp,
+                        model: model
+                    )
+                    return (metadata, nil)
+                } catch {
+                    return (nil, error.localizedDescription)
+                }
+            }()
+
+            await MainActor.run {
+                if let metadata = result.metadata {
+                    TranscriptionHistoryStore.shared.attachAudio(metadata, to: entryID)
+                } else if let error = result.error {
+                    DebugLogger.shared.error("Failed to save dictation audio: \(error)", source: "ContentView")
+                }
+            }
+        }
+    }
+
+    private var isOnboardingVoicePlaygroundStepActive: Bool {
         let onboardingPlaygroundStep = 4
-        let isOnboardingPlayground = !self.settings.onboardingCompleted &&
+        return !self.settings.onboardingCompleted &&
             self.settings.onboardingCurrentStep == onboardingPlaygroundStep
+    }
+
+    private var isOnboardingSandboxRouteActive: Bool {
+        let onboardingAIEnhancementStep = 5
+        return self.isOnboardingVoicePlaygroundStepActive ||
+            (!self.settings.onboardingCompleted && self.settings.onboardingCurrentStep == onboardingAIEnhancementStep)
+    }
+
+    private func currentDictationOutputRouteForHotkeyStop() -> DictationOutputRoute {
         let isDictationMode = self.activeRecordingMode == .dictate || self.activeRecordingMode == .promptMode
 
-        if isOnboardingPlayground && isDictationMode {
+        if self.isOnboardingSandboxRouteActive && isDictationMode {
             return .onboardingSandbox
         }
         return .normal
     }
 
-    private func reprocessLastDictationFromHistory() {
+    private func reprocessLastDictation() {
+        if let pendingText = self.pendingAIReprocessText?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !pendingText.isEmpty
+        {
+            DebugLogger.shared.info("Actions: Reprocessing pending failed dictation", source: "ContentView")
+            Task { @MainActor in
+                await self.reprocessDictationText(pendingText)
+            }
+            return
+        }
+
         guard let last = TranscriptionHistoryStore.shared.entries.first else {
             DebugLogger.shared.info("Actions: Reprocess requested but history is empty", source: "ContentView")
             return
@@ -2144,9 +2374,14 @@ struct ContentView: View {
         if self.asr.isRunning {
             DebugLogger.shared.info("Actions: stopping active recording before history action output", source: "ContentView")
             await self.asr.stopWithoutTranscription()
+            self.cancelPrewarmDictationIfNeeded()
         }
 
-        let finalText = ASRService.applyGAAVFormatting(text)
+        let gaavText = ASRService.applyGAAVFormatting(text)
+        let precedingText = SettingsStore.shared.needsDictationFormattingContext
+            ? TypingService.textBeforeCursorInFocusedField()
+            : ""
+        let finalText = ASRService.applyContinuousDictationFormatting(gaavText, precedingText: precedingText)
         let appInfo = self.getCurrentAppInfo()
 
         if saveToHistory, SettingsStore.shared.saveTranscriptionHistory {
@@ -2154,7 +2389,8 @@ struct ContentView: View {
                 rawText: text,
                 processedText: finalText,
                 appName: appInfo.name,
-                windowTitle: appInfo.windowTitle
+                windowTitle: appInfo.windowTitle,
+                wasAIProcessed: false
             )
         }
 
@@ -2189,6 +2425,7 @@ struct ContentView: View {
         if self.asr.isRunning {
             DebugLogger.shared.info("Actions: stopping active recording before reprocess", source: "ContentView")
             await self.asr.stopWithoutTranscription()
+            self.cancelPrewarmDictationIfNeeded()
         }
 
         self.setActiveRecordingMode(.dictate)
@@ -2198,11 +2435,16 @@ struct ContentView: View {
 
         var finalText = transcribedText
         var aiFallbackReason: String?
+        var postProcessingModel: String?
         let appInfo = self.getCurrentAppInfo()
         let shouldUseAI = DictationAIPostProcessingGate.isConfigured(for: .primary, appBundleID: appInfo.bundleId)
         if shouldUseAI {
+            postProcessingModel = self.currentDictationAIModelInfo().model
             do {
-                finalText = try await self.processTextWithAI(transcribedText)
+                finalText = try await self.processTextWithAI(
+                    transcribedText,
+                    dictationSlot: .primary
+                )
             } catch {
                 DebugLogger.shared.error(
                     "AI reprocess failed, falling back to raw transcription: \(error.localizedDescription)",
@@ -2218,6 +2460,11 @@ struct ContentView: View {
         self.menuBarManager.setProcessing(false)
 
         finalText = ASRService.applyGAAVFormatting(finalText)
+        let precedingText = SettingsStore.shared.needsDictationFormattingContext
+            ? TypingService.textBeforeCursorInFocusedField()
+            : ""
+        finalText = ASRService.applyContinuousDictationFormatting(finalText, precedingText: precedingText)
+        self.recordingPrecedingText = ""
 
         if SettingsStore.shared.saveTranscriptionHistory {
             TranscriptionHistoryStore.shared.addEntry(
@@ -2225,8 +2472,16 @@ struct ContentView: View {
                 processedText: finalText,
                 appName: appInfo.name,
                 windowTitle: appInfo.windowTitle,
+                wasAIProcessed: postProcessingModel != nil && aiFallbackReason == nil,
+                processingModel: postProcessingModel,
                 aiProcessingError: aiFallbackReason
             )
+        }
+        if aiFallbackReason != nil {
+            self.pendingAIReprocessText = transcribedText
+            NotchContentState.shared.showAIProcessingFailure()
+        } else {
+            self.pendingAIReprocessText = nil
         }
 
         if SettingsStore.shared.copyTranscriptionToClipboard {
@@ -2348,6 +2603,14 @@ struct ContentView: View {
         self.setActiveRecordingMode(.none)
     }
 
+    /// Cancel an in-flight prewarm. Called on abort / new recording start — NOT on
+    /// a normal stop, because AI post-processing runs after stop and benefits from
+    /// the warm prefix cache the prewarm prime.
+    private func cancelPrewarmDictationIfNeeded() {
+        self.prewarmDictationTask?.cancel()
+        self.prewarmDictationTask = nil
+    }
+
     private func handleLivePromptModeSwitch(_ mode: SettingsStore.PromptMode) {
         guard !NotchContentState.shared.isProcessing else { return }
         switch mode.normalized {
@@ -2432,6 +2695,7 @@ struct ContentView: View {
         // Ensure normal dictation mode is set (command/rewrite modes set their own)
         if !self.isRecordingForCommand, !self.isRecordingForRewrite {
             self.menuBarManager.setOverlayMode(.dictation)
+            self.menuBarManager.showRecordingOverlayImmediately()
         }
 
         if !self.isRecordingForCommand, !self.isRecordingForRewrite {
@@ -2440,6 +2704,9 @@ struct ContentView: View {
 
         Task {
             await self.asr.start()
+            if !self.asr.isRunning {
+                self.menuBarManager.hideRecordingOverlayImmediately(reason: "asr_start_failed")
+            }
         }
 
         // Pre-load model in background while recording (avoids 10s freeze on stop)
@@ -2452,23 +2719,60 @@ struct ContentView: View {
                 DebugLogger.shared.error("Failed to pre-load model: \(error)", source: "ContentView")
             }
         }
+
+        self.prewarmPrivateAIDictationIfNeeded(for: .primary)
+    }
+
+    private func prewarmPrivateAIDictationIfNeeded(for slot: SettingsStore.DictationShortcutSlot) {
+        let appBundleID = self.recordingAppInfo?.bundleId
+        guard PrivateAIProviderPromptFormat.isAvailable(settings: SettingsStore.shared),
+              DictationAIPostProcessingGate.isConfigured(for: slot, appBundleID: appBundleID)
+        else { return }
+
+        // Cancel any prior prewarm so rapid start/stop doesn't queue duplicate
+        // actor work on PrivateAIIntegrationService.
+        self.prewarmDictationTask?.cancel()
+        self.prewarmDictationTask = Task {
+            DebugLogger.shared.debug(
+                "ContentView: AI dictation prewarm started slot=\(slot.rawValue)",
+                source: "ContentView"
+            )
+            await PrivateAIIntegrationService.shared.prewarmDictation()
+            DebugLogger.shared.debug(
+                "AI dictation prewarm complete slot=\(slot.rawValue)",
+                source: "ContentView"
+            )
+            if !Task.isCancelled {
+                self.prewarmDictationTask = nil
+            }
+        }
     }
 
     /// Best-effort: re-activate the app that was focused when recording started.
-    /// Adds a short delay after activation so macOS can deliver focus before typing begins.
+    /// Skips the AX restore work when the captured text element is already focused.
     private func restoreFocusToRecordingTarget() async {
         guard let pid = NotchContentState.shared.recordingTargetPID else { return }
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        self.appBench("focus_restore_start targetPID=\(pid)")
+        if TypingService.isCapturedFocusStillActive(for: pid) {
+            self.appBench("focus_restore_result activated=false element=true elapsedMs=0 reason=already_focused")
+            DebugLogger.shared.debug(
+                "Restore focus skipped; captured element still focused, targetPID: \(pid)",
+                source: "ContentView"
+            )
+            self.appBench("focus_restore_settle_done delayMs=0")
+            return
+        }
         let activated = TypingService.activateApp(pid: pid)
         let focusedElementRestored = TypingService.restoreCapturedFocus(in: pid)
+        self.appBench(
+            "focus_restore_result activated=\(activated) element=\(focusedElementRestored) elapsedMs=\(Int(((ProcessInfo.processInfo.systemUptime - startedAt) * 1000).rounded()))"
+        )
         DebugLogger.shared.debug(
             "Restore focus -> appActivated: \(activated), elementFocusRestored: \(focusedElementRestored), targetPID: \(pid)",
             source: "ContentView"
         )
-        if activated {
-            // Small delay to allow focus to settle before typing events fire.
-            let settleNanos: UInt64 = 10_000_000
-            try? await Task.sleep(nanoseconds: settleNanos)
-        }
+        self.appBench("focus_restore_settle_done delayMs=0")
     }
 
     // MARK: - ASR Model Management
@@ -2558,7 +2862,7 @@ struct ContentView: View {
             self.handleLiveOverlayModeSwitch(mode)
         }
         NotchContentState.shared.onReprocessLastRequested = {
-            self.reprocessLastDictationFromHistory()
+            self.reprocessLastDictation()
         }
         NotchContentState.shared.onCopyLastRequested = {
             self.copyLastDictationFromHistory()
@@ -2573,6 +2877,15 @@ struct ContentView: View {
             _ = self.handleCancelShortcut()
         }
         NotchContentState.shared.onDictationPromptSelectionRequested = { selection in
+            let privateAIAvailable = PrivateAIProviderPromptFormat.isAvailable()
+            switch selection {
+            case .off:
+                break
+            case .privateAI:
+                guard privateAIAvailable else { return }
+            case .default, .profile:
+                guard !privateAIAvailable else { return }
+            }
             let slot = self.activeDictationShortcutSlot ?? .primary
             SettingsStore.shared.setDictationPromptSelection(selection, for: slot)
             self.applyDictationShortcutSelectionContext(for: slot)
@@ -2586,6 +2899,7 @@ struct ContentView: View {
             promptModeShortcut: self.promptModeHotkeyShortcut,
             commandModeShortcut: self.commandModeHotkeyShortcut,
             rewriteModeShortcut: self.rewriteModeHotkeyShortcut,
+            promptShortcutAssignments: SettingsStore.shared.dictationPromptShortcutAssignments(),
             promptModeShortcutEnabled: self.isPromptModeShortcutEnabled,
             commandModeShortcutEnabled: self.isCommandModeShortcutEnabled,
             rewriteModeShortcutEnabled: self.isRewriteModeShortcutEnabled,
@@ -2609,6 +2923,10 @@ struct ContentView: View {
             promptModeCallback: {
                 DebugLogger.shared.info("Prompt mode triggered", source: "ContentView")
                 self.beginDictationRecording(for: .secondary, mode: .promptMode)
+            },
+            promptSelectionCallback: { selection in
+                DebugLogger.shared.info("Prompt selection shortcut triggered", source: "ContentView")
+                self.beginDictationRecording(for: selection, mode: .promptMode)
             },
             commandModeCallback: {
                 DebugLogger.shared.info("Command mode triggered", source: "ContentView")
@@ -2702,6 +3020,7 @@ struct ContentView: View {
 
             // Reset recording mode flags
             if self.activeRecordingMode != .none {
+                self.cancelPrewarmDictationIfNeeded()
                 self.clearActiveRecordingMode()
                 handled = true
             }
@@ -2756,6 +3075,7 @@ struct ContentView: View {
         if self.asr.isRunning {
             DebugLogger.shared.debug("Cancel shortcut: cancelling ASR recording", source: "ContentView")
             Task { await self.asr.stopWithoutTranscription() }
+            self.cancelPrewarmDictationIfNeeded()
             handled = true
         }
 
@@ -2929,6 +3249,10 @@ extension ContentView {
             self.promptModeOverrideText = nil
             NotchContentState.shared.promptModeOverrideProfileName = nil
             NotchContentState.shared.promptModeOverrideProfileID = nil
+        case .privateAI:
+            self.promptModeOverrideText = nil
+            NotchContentState.shared.promptModeOverrideProfileName = PrivateAIProviderFeature.displayName
+            NotchContentState.shared.promptModeOverrideProfileID = PrivateAIProviderPromptFormat.promptSelectionID
         case let .profile(profileID):
             guard let profile = settings.selectedDictationPromptProfile(for: slot) ?? settings.dictationPromptProfiles.first(where: {
                 $0.id == profileID && $0.mode.normalized == .dictate
@@ -2951,19 +3275,81 @@ extension ContentView {
 
     private func beginDictationRecording(for slot: SettingsStore.DictationShortcutSlot, mode: ActiveRecordingMode) {
         DebugLogger.shared.debug("Begin dictation recording for slot \(slot.rawValue)", source: "ContentView")
+        self.appBench("begin_recording slot=\(slot.rawValue) mode=\(mode.rawValue)")
+        if self.isOnboardingVoicePlaygroundStepActive {
+            self.asr.finalText = ""
+            self.settings.onboardingPlaygroundValidated = false
+            self.settings.onboardingPlaygroundSkipped = false
+            self.settings.playgroundUsed = false
+            self.playgroundUsed = false
+        }
         self.captureRecordingContext()
+        self.applyDictationPromptConfiguration(for: SettingsStore.shared.dictationPromptSelection(for: slot))
         self.applyDictationShortcutSelectionContext(for: slot)
         self.setActiveRecordingMode(mode)
         self.rewriteModeService.clearState()
+        self.appBench("overlay_mode_request mode=Dictation")
         self.menuBarManager.setOverlayMode(.dictation)
+        self.menuBarManager.showRecordingOverlayImmediately()
+        self.appBench("overlay_mode_requested mode=Dictation")
+        self.prewarmPrivateAIDictationIfNeeded(for: slot)
 
-        guard !self.asr.isRunning else { return }
+        guard !self.asr.isRunning else {
+            self.appBench("asr_start_skipped reason=already_running")
+            return
+        }
         if SettingsStore.shared.enableTranscriptionSounds {
             TranscriptionSoundPlayer.shared.playStartSound()
         }
         Task {
+            let asrStartStartedAt = ProcessInfo.processInfo.systemUptime
+            DebugLogger.shared.benchmark("APP_BENCH", message: "asr_start_call", source: "AppBenchmark")
             await self.asr.start()
+            if !self.asr.isRunning {
+                self.menuBarManager.hideRecordingOverlayImmediately(reason: "asr_start_failed")
+            }
+            DebugLogger.shared.benchmark(
+                "APP_BENCH",
+                message: "asr_start_return elapsedMs=\(Int(((ProcessInfo.processInfo.systemUptime - asrStartStartedAt) * 1000).rounded()))",
+                source: "AppBenchmark"
+            )
         }
+    }
+
+    private func beginDictationRecording(for selection: SettingsStore.DictationPromptSelection, mode: ActiveRecordingMode) {
+        let settings = SettingsStore.shared
+        settings.setDictationPromptSelection(selection, for: .secondary)
+        self.applyDictationPromptConfiguration(for: selection)
+        self.beginDictationRecording(for: .secondary, mode: mode)
+    }
+
+    private func applyDictationPromptConfiguration(for selection: SettingsStore.DictationPromptSelection) {
+        let providerID: String
+        let modelName: String
+
+        if selection == .privateAI {
+            providerID = PrivateAIProviderFeature.shared.providerID
+            modelName = PrivateAIIntegrationService.configuredModelID
+        } else {
+            let configuration = SettingsStore.shared.dictationPromptConfiguration(for: selection)
+            providerID = configuration.providerID.trimmingCharacters(in: .whitespacesAndNewlines)
+            modelName = configuration.modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !providerID.isEmpty, !modelName.isEmpty else { return }
+        }
+
+        let providerKey = self.providerKey(for: providerID)
+        SettingsStore.shared.selectedProviderID = providerID
+        var selectedModels = SettingsStore.shared.selectedModelByProvider
+        selectedModels[providerKey] = modelName
+        SettingsStore.shared.selectedModelByProvider = selectedModels
+        self.selectedProviderID = providerID
+        self.currentProvider = providerKey
+        self.selectedModelByProvider = selectedModels
+        self.selectedModel = modelName
+    }
+
+    private func appBench(_ message: String) {
+        DebugLogger.shared.benchmark("APP_BENCH", message: message, source: "AppBenchmark")
     }
 
     private func callOpenAIChat() async {
@@ -2995,7 +3381,7 @@ extension ContentView {
     }
 
     private var onboardingVoiceModelReady: Bool {
-        self.asr.isAsrReady || self.asr.modelsExistOnDisk || SettingsStore.shared.selectedSpeechModel.isInstalled
+        self.asr.isAsrReady
     }
 
     private var onboardingMicrophoneReady: Bool {
@@ -3007,19 +3393,11 @@ extension ContentView {
     }
 
     private var onboardingAIReady: Bool {
-        self.settings.onboardingAISkipped || DictationAIPostProcessingGate.isConfigured()
+        self.settings.onboardingAISkipped || DictationAIPostProcessingGate.isProviderConfigured()
     }
 
     private var onboardingPlaygroundReady: Bool {
-        self.settings.onboardingPlaygroundValidated
-    }
-
-    private var canCompleteOnboarding: Bool {
-        self.onboardingVoiceModelReady &&
-            self.onboardingMicrophoneReady &&
-            self.onboardingAccessibilityReady &&
-            self.onboardingAIReady &&
-            self.onboardingPlaygroundReady
+        self.settings.onboardingPlaygroundValidated || self.settings.onboardingPlaygroundSkipped
     }
 
     @MainActor
@@ -3036,13 +3414,64 @@ extension ContentView {
 // MARK: - ContentView Accessibility & Lifecycle Helpers
 
 extension ContentView {
-    func completeOnboardingIfPossible() {
-        guard self.canCompleteOnboarding else { return }
+    func completeOnboardingIfPossible(selecting target: SidebarItem? = nil) {
+        let missingRequirements = self.missingOnboardingCompletionRequirements()
+        guard missingRequirements.isEmpty else {
+            self.presentOnboardingCompletionBlocked(missingRequirements)
+            return
+        }
 
+        self.completeOnboarding(selecting: target)
+    }
+
+    func completeOnboardingForAIProviderSetup() {
+        let missingRequirements = self.missingOnboardingCompletionRequirements(allowsAIConfiguration: true)
+        guard missingRequirements.isEmpty else {
+            self.presentOnboardingCompletionBlocked(missingRequirements)
+            return
+        }
+
+        self.completeOnboarding(selecting: .aiEnhancements)
+    }
+
+    private func completeOnboarding(selecting target: SidebarItem? = nil) {
         self.settings.onboardingCompleted = true
 
         let isOnboarded = self.asr.isAsrReady || self.asr.modelsExistOnDisk
-        self.selectedSidebarItem = isOnboarded ? .preferences : .welcome
+        self.selectedSidebarItem = target ?? (isOnboarded ? .preferences : .welcome)
+    }
+
+    private func missingOnboardingCompletionRequirements(allowsAIConfiguration: Bool = false) -> [String] {
+        var missing: [String] = []
+
+        if !self.onboardingVoiceModelReady {
+            missing.append("voice model")
+        }
+        if !self.onboardingMicrophoneReady {
+            missing.append("microphone access")
+        }
+        if !self.onboardingAccessibilityReady {
+            missing.append("Accessibility access")
+        }
+        if !allowsAIConfiguration, !self.onboardingAIReady {
+            missing.append("AI choice")
+        }
+        if !self.onboardingPlaygroundReady {
+            missing.append("test or skip")
+        }
+
+        return missing
+    }
+
+    private func presentOnboardingCompletionBlocked(_ missingRequirements: [String]) {
+        let missingText = missingRequirements.joined(separator: ", ")
+        DebugLogger.shared.warning(
+            "Onboarding completion blocked; missing=\(missingText)",
+            source: "ContentView"
+        )
+        self.asr.errorTitle = "Setup Isn't Complete"
+        self.asr.errorMessage = "Finish \(missingText) to continue."
+        self.asr.showError = true
     }
 
     func labelFor(status: AVAuthorizationStatus) -> String {
@@ -3060,10 +3489,253 @@ extension ContentView {
     }
 
     func openAccessibilitySettings() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        AXIsProcessTrustedWithOptions(options)
+        let requestID = UUID()
+        self.accessibilityGuideRequestID = requestID
+
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
         self.didOpenAccessibilityPane = true
         UserDefaults.standard.set(true, forKey: self.accessibilityRestartFlagKey)
+        self.startAccessibilityPolling()
+        self.positionWindowBesideSystemSettings(requestID: requestID)
+        self.showAccessibilityGuidePanel(requestID: requestID)
+        self.activateSystemSettingsSoon(requestID: requestID)
+    }
+
+    private func positionWindowBesideSystemSettings(requestID: UUID) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            guard self.accessibilityGuideRequestID == requestID else { return }
+            guard let window = NSApp.windows.first(where: { $0.isVisible && $0.title == "FluidVoice" }) ?? NSApp.keyWindow else {
+                return
+            }
+
+            let screen = self.systemSettingsWindowFrame()
+                .flatMap { settingsFrame in
+                    NSScreen.screens.first { $0.frame.intersects(settingsFrame) }
+                } ?? window.screen ?? NSScreen.main
+            guard let screen else { return }
+
+            let visibleFrame = screen.visibleFrame
+            let currentSize = window.frame.size
+            let guideWidth = min(currentSize.width, max(640, visibleFrame.width * 0.42))
+            let guideHeight = min(currentSize.height, visibleFrame.height - 56)
+            let targetSize = NSSize(width: guideWidth, height: guideHeight)
+
+            let settingsFrame = self.systemSettingsWindowFrame()
+            let gap: CGFloat = 20
+            let targetX: CGFloat
+            if let settingsFrame, settingsFrame.maxX + gap + targetSize.width <= visibleFrame.maxX {
+                targetX = settingsFrame.maxX + gap
+            } else if let settingsFrame, settingsFrame.minX - gap - targetSize.width >= visibleFrame.minX {
+                targetX = settingsFrame.minX - gap - targetSize.width
+            } else {
+                targetX = visibleFrame.maxX - targetSize.width - 24
+            }
+
+            let targetY: CGFloat
+            if let settingsFrame {
+                targetY = min(
+                    visibleFrame.maxY - targetSize.height - 16,
+                    max(visibleFrame.minY + 16, settingsFrame.maxY - targetSize.height)
+                )
+            } else {
+                targetY = visibleFrame.midY - (targetSize.height / 2)
+            }
+
+            window.setFrame(
+                NSRect(origin: NSPoint(x: targetX, y: targetY), size: targetSize),
+                display: true,
+                animate: true
+            )
+            window.orderBack(nil)
+        }
+    }
+
+    private func systemSettingsWindowFrame() -> NSRect? {
+        guard let windowList = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+
+        for info in windowList {
+            guard (info[kCGWindowOwnerName as String] as? String) == "System Settings",
+                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                  let x = bounds["X"] as? CGFloat,
+                  let y = bounds["Y"] as? CGFloat,
+                  let width = bounds["Width"] as? CGFloat,
+                  let height = bounds["Height"] as? CGFloat,
+                  width > 0,
+                  height > 0
+            else {
+                continue
+            }
+
+            for screen in NSScreen.screens {
+                let convertedFrame = NSRect(
+                    x: x,
+                    y: screen.frame.maxY - y - height,
+                    width: width,
+                    height: height
+                )
+                if screen.frame.intersects(convertedFrame) {
+                    return convertedFrame
+                }
+            }
+
+            let convertedY = (NSScreen.main?.frame.maxY ?? 0) - y - height
+            return NSRect(x: x, y: convertedY, width: width, height: height)
+        }
+
+        return nil
+    }
+
+    private func showAccessibilityGuidePanel(requestID: UUID) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
+            guard self.accessibilityGuideRequestID == requestID else { return }
+            guard !AXIsProcessTrusted() else {
+                self.finishAccessibilityPermissionFlow()
+                return
+            }
+
+            let settingsFrame = self.systemSettingsWindowFrame()
+            let screen = settingsFrame
+                .flatMap { frame in NSScreen.screens.first { $0.frame.intersects(frame) } } ?? NSScreen.main
+            guard let screen else { return }
+
+            let visibleFrame = screen.visibleFrame
+            let panelWidth = min(max((settingsFrame?.width ?? visibleFrame.width * 0.48) * 0.86, 520), 760)
+            let panelHeight: CGFloat = 132
+            let gap: CGFloat = 14
+
+            let panelX: CGFloat
+            let panelY: CGFloat
+            if let settingsFrame {
+                panelX = min(
+                    visibleFrame.maxX - panelWidth - 16,
+                    max(visibleFrame.minX + 16, settingsFrame.midX - (panelWidth / 2))
+                )
+                panelY = max(visibleFrame.minY + 16, settingsFrame.minY - panelHeight - gap)
+            } else {
+                panelX = visibleFrame.midX - (panelWidth / 2)
+                panelY = visibleFrame.minY + 120
+            }
+
+            let frame = NSRect(x: panelX, y: panelY, width: panelWidth, height: panelHeight)
+            let panel = self.accessibilityGuidePanel ?? NSPanel(
+                contentRect: frame,
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+
+            panel.level = .floating
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.hasShadow = true
+            panel.hidesOnDeactivate = false
+            panel.contentView = NSHostingView(
+                rootView: AccessibilitySettingsFloatingGuideView(
+                    appURL: self.draggableAccessibilityAppURL,
+                    onReturnToApp: {
+                        self.cancelAccessibilityPermissionFlow()
+                    },
+                    onClose: {
+                        self.cancelAccessibilityPermissionFlow()
+                    }
+                )
+            )
+            panel.setFrame(frame, display: true, animate: self.accessibilityGuidePanel != nil)
+            panel.orderFrontRegardless()
+            self.accessibilityGuidePanel = panel
+            self.startAccessibilityGuidePanelMonitor()
+            self.activateSystemSettingsSoon(requestID: requestID)
+        }
+    }
+
+    private func activateSystemSettingsSoon(requestID: UUID) {
+        for delay in [0.25, 0.85, 1.45] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard self.accessibilityGuideRequestID == requestID else { return }
+                self.activateSystemSettings()
+            }
+        }
+    }
+
+    private func activateSystemSettings() {
+        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.SystemSettings" }) ??
+            NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.systempreferences" }) ??
+            NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == "System Settings" })
+        {
+            app.activate(options: [])
+        }
+    }
+
+    private func cancelAccessibilityPermissionFlow() {
+        self.finishAccessibilityPermissionFlow()
+        NSApp.activate(ignoringOtherApps: true)
+        (NSApp.windows.first { $0.isVisible && $0.title == "FluidVoice" } ?? NSApp.keyWindow)?
+            .makeKeyAndOrderFront(nil)
+    }
+
+    private func finishAccessibilityPermissionFlow() {
+        self.accessibilityGuideRequestID = nil
+        self.didOpenAccessibilityPane = false
+        self.showRestartPrompt = false
+        UserDefaults.standard.set(false, forKey: self.accessibilityRestartFlagKey)
+        self.closeAccessibilityGuidePanel()
+        self.stopAccessibilityPolling()
+    }
+
+    private func closeAccessibilityGuidePanel() {
+        self.accessibilityGuideMonitorTask?.cancel()
+        self.accessibilityGuideMonitorTask = nil
+        self.accessibilityGuidePanel?.close()
+        self.accessibilityGuidePanel = nil
+    }
+
+    private func startAccessibilityGuidePanelMonitor() {
+        self.accessibilityGuideMonitorTask?.cancel()
+        self.accessibilityGuideMonitorTask = Task {
+            var missingSettingsCount = 0
+
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 900_000_000)
+
+                let isTrusted = AXIsProcessTrusted()
+                let settingsFrame = await MainActor.run {
+                    self.systemSettingsWindowFrame()
+                }
+
+                if isTrusted {
+                    await MainActor.run {
+                        self.finishAccessibilityPermissionFlow()
+                    }
+                    return
+                }
+
+                if settingsFrame == nil {
+                    missingSettingsCount += 1
+                } else {
+                    missingSettingsCount = 0
+                }
+
+                if missingSettingsCount >= 3 {
+                    await MainActor.run {
+                        self.cancelAccessibilityPermissionFlow()
+                    }
+                    return
+                }
+            }
+        }
+    }
+
+    private var draggableAccessibilityAppURL: URL {
+        let installedURL = URL(fileURLWithPath: "/Applications/FluidVoice.app")
+        if FileManager.default.fileExists(atPath: installedURL.path) {
+            return installedURL
+        }
+        return Bundle.main.bundleURL
     }
 
     func restartApp() {
@@ -3098,6 +3770,7 @@ extension ContentView {
                 if nowTrusted && !self.accessibilityEnabled {
                     await MainActor.run {
                         DebugLogger.shared.info("Accessibility permission granted! Auto-restarting app...", source: "ContentView")
+                        self.finishAccessibilityPermissionFlow()
 
                         // Mark that we've auto-restarted to prevent loops
                         UserDefaults.standard.set(true, forKey: self.hasAutoRestartedForAccessibilityKey)
@@ -3112,9 +3785,135 @@ extension ContentView {
             }
         }
     }
+
+    private func stopAccessibilityPolling() {
+        self.accessibilityPollingTask?.cancel()
+        self.accessibilityPollingTask = nil
+    }
 }
 
 // swiftlint:enable type_body_length
+
+private struct AccessibilitySettingsFloatingGuideView: View {
+    let appURL: URL
+    let onReturnToApp: () -> Void
+    let onClose: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isArrowRaised = false
+    @State private var isTokenHovered = false
+
+    private var appIcon: NSImage {
+        NSWorkspace.shared.icon(forFile: self.appURL.path)
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 30, weight: .bold))
+                    .foregroundStyle(FluidOnboardingLandingColors.blue)
+                    .offset(y: self.reduceMotion ? 0 : (self.isArrowRaised ? -8 : 4))
+                    .animation(
+                        self.reduceMotion ? nil : .easeInOut(duration: 0.85).repeatForever(autoreverses: true),
+                        value: self.isArrowRaised
+                    )
+
+                Text("Drag FluidVoice into the Accessibility apps list as shown")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.78))
+                    .lineLimit(1)
+
+                Spacer()
+
+                Button {
+                    self.onClose()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.58))
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(Color.white.opacity(0.075)))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .help("Close guide")
+            }
+
+            HStack(spacing: 12) {
+                Button {
+                    self.onReturnToApp()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .frame(width: 34, height: 34)
+                        .background(Circle().fill(Color.white.opacity(0.075)))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .help("Return to FluidVoice")
+
+                Image(nsImage: self.appIcon)
+                    .resizable()
+                    .frame(width: 34, height: 34)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                Text("FluidVoice")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+
+                Spacer()
+
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.38))
+            }
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity)
+            .frame(height: 56)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.white.opacity(self.isTokenHovered ? 0.095 : 0.055))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color.white.opacity(self.isTokenHovered ? 0.16 : 0.08), lineWidth: 1)
+                    )
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .onHover { isHovered in
+                if self.reduceMotion {
+                    self.isTokenHovered = isHovered
+                } else {
+                    withAnimation(.easeOut(duration: 0.14)) {
+                        self.isTokenHovered = isHovered
+                    }
+                }
+            }
+            .onDrag {
+                NSItemProvider(object: self.appURL as NSURL)
+            }
+            .accessibilityLabel("Drag FluidVoice to the Accessibility list")
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(red: 0.11, green: 0.11, blue: 0.13).opacity(0.96))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                )
+        )
+        .onAppear {
+            guard !self.reduceMotion else { return }
+            self.isArrowRaised = true
+        }
+    }
+}
 
 private extension ContentView {
     func reloadSettingsStateAfterBackupRestore() {
@@ -3144,6 +3943,7 @@ private extension ContentView {
         self.hotkeyManager?.updateShortcut(self.hotkeyShortcut)
         self.hotkeyManager?.updatePromptModeShortcut(self.promptModeHotkeyShortcut)
         self.hotkeyManager?.updatePromptModeShortcutEnabled(self.isPromptModeShortcutEnabled)
+        self.hotkeyManager?.updatePromptShortcutAssignments(SettingsStore.shared.dictationPromptShortcutAssignments())
         self.hotkeyManager?.updateCommandModeShortcut(self.commandModeHotkeyShortcut)
         self.hotkeyManager?.updateCommandModeShortcutEnabled(self.isCommandModeShortcutEnabled)
         self.hotkeyManager?.updateRewriteModeShortcut(self.rewriteModeHotkeyShortcut)
@@ -3170,6 +3970,36 @@ private extension ContentView {
         }
 
         self.refreshDevices()
+    }
+}
+
+private struct TodayStatsToolbarButton: View {
+    @ObservedObject private var historyStore = TranscriptionHistoryStore.shared
+
+    let typingWPM: Int
+    let action: () -> Void
+
+    var body: some View {
+        let summary = self.historyStore.todaySummary
+        let timeSaved = summary.formattedTimeSaved(typingWPM: self.typingWPM)
+        let hasActivity = summary.words > 0
+
+        return Button(action: self.action) {
+            HStack(spacing: 4) {
+                Image(systemName: hasActivity ? "waveform" : "chart.bar.fill")
+                if hasActivity {
+                    Text("\(summary.words) words")
+                    Text("·")
+                        .foregroundStyle(.secondary)
+                    Text(timeSaved)
+                } else {
+                    Text("Today")
+                }
+            }
+            .font(.system(size: 12, weight: .medium))
+        }
+        .help(hasActivity ? "Today: \(summary.words) words · \(timeSaved) saved - view stats" : "View your stats")
+        .accessibilityLabel("Today stats")
     }
 }
 

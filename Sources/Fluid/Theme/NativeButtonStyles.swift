@@ -12,6 +12,39 @@ enum FluidInteractionVisuals {
     }
 }
 
+enum FluidButtonRole {
+    case primary
+    case secondary
+    case glass
+    case compact
+    case accent
+    case inline
+}
+
+enum FluidButtonSize: Equatable {
+    case compact
+    case small
+    case medium
+    case large
+
+    var controlHeight: CGFloat {
+        switch self {
+        case .compact:
+            return 34
+        case .small:
+            return 32
+        case .medium:
+            return 36
+        case .large:
+            return 44
+        }
+    }
+
+    var accentCompact: Bool {
+        self == .small || self == .compact
+    }
+}
+
 extension View {
     func fluidControlSurface(
         isSelected: Bool,
@@ -24,6 +57,42 @@ extension View {
             isHovered: isHovered,
             tone: tone,
             cornerRadius: cornerRadius
+        ))
+    }
+
+    @ViewBuilder
+    func fluidButton(
+        _ role: FluidButtonRole,
+        size: FluidButtonSize = .medium,
+        isRecording: Bool = false
+    ) -> some View {
+        switch role {
+        case .primary:
+            self.buttonStyle(PremiumButtonStyle(isRecording: isRecording, height: size.controlHeight))
+        case .secondary:
+            self.buttonStyle(SecondaryButtonStyle(height: size.controlHeight))
+        case .glass:
+            self.buttonStyle(GlassButtonStyle(height: size.controlHeight))
+        case .compact:
+            self.buttonStyle(CompactButtonStyle(height: size.controlHeight))
+        case .accent:
+            self.buttonStyle(AccentButtonStyle(compact: size.accentCompact))
+        case .inline:
+            self.buttonStyle(InlineButtonStyle())
+        }
+    }
+
+    func fluidCompactButton(
+        size: FluidButtonSize = .compact,
+        isReady: Bool = false,
+        foreground: Color? = nil,
+        borderColor: Color? = nil
+    ) -> some View {
+        self.buttonStyle(CompactButtonStyle(
+            isReady: isReady,
+            foreground: foreground,
+            borderColor: borderColor,
+            height: size.controlHeight
         ))
     }
 }
@@ -201,14 +270,17 @@ struct PremiumButtonStyle: ButtonStyle {
 // MARK: - Secondary Button
 
 struct SecondaryButtonStyle: ButtonStyle {
+    var height: CGFloat = 42
+
     func makeBody(configuration: Configuration) -> some View {
-        SecondaryButton(configuration: configuration)
+        SecondaryButton(configuration: configuration, height: self.height)
     }
 
     private struct SecondaryButton: View {
         @Environment(\.theme) private var theme
         @State private var isHovered = false
         let configuration: ButtonStyle.Configuration
+        let height: CGFloat
 
         private var shape: RoundedRectangle {
             RoundedRectangle(cornerRadius: self.theme.metrics.corners.lg, style: .continuous)
@@ -218,7 +290,7 @@ struct SecondaryButtonStyle: ButtonStyle {
             self.configuration.label
                 .fontWeight(.semibold)
                 .frame(maxWidth: .infinity)
-                .frame(height: 42)
+                .frame(height: self.height)
                 .foregroundStyle(self.theme.palette.primaryText)
                 .background(self.theme.materials.card, in: self.shape)
                 .background(
@@ -251,13 +323,15 @@ struct CompactButtonStyle: ButtonStyle {
     var isReady: Bool = false
     var foreground: Color? = nil
     var borderColor: Color? = nil
+    var height: CGFloat = 34
 
     func makeBody(configuration: Configuration) -> some View {
         CompactButton(
             configuration: configuration,
             isReady: self.isReady,
             foreground: self.foreground,
-            borderColor: self.borderColor
+            borderColor: self.borderColor,
+            height: self.height
         )
     }
 
@@ -268,6 +342,7 @@ struct CompactButtonStyle: ButtonStyle {
         let isReady: Bool
         let foreground: Color?
         let borderColor: Color?
+        let height: CGFloat
 
         private var shape: RoundedRectangle {
             RoundedRectangle(cornerRadius: self.theme.metrics.corners.sm, style: .continuous)
@@ -276,11 +351,14 @@ struct CompactButtonStyle: ButtonStyle {
         var body: some View {
             let border = self.borderColor ?? (self.isReady ? self.theme.palette.accent : self.theme.palette.cardBorder)
             let foregroundColor = self.foreground ?? self.theme.palette.primaryText
+            let borderOpacity = self.borderColor == nil
+                ? (self.isHovered ? 0.56 : 0.38)
+                : (self.isHovered ? 0.64 : 0.48)
 
             self.configuration.label
                 .fontWeight(.medium)
                 .padding(.horizontal, self.theme.metrics.spacing.md)
-                .frame(height: 34)
+                .frame(height: self.height)
                 .foregroundStyle(foregroundColor)
                 .background(self.theme.materials.card, in: self.shape)
                 .background(
@@ -288,16 +366,16 @@ struct CompactButtonStyle: ButtonStyle {
                         .fill(self.theme.palette.cardBackground)
                         .overlay(
                             self.shape.stroke(
-                                border.opacity(self.isHovered ? 0.45 : 0.25),
+                                border.opacity(borderOpacity),
                                 lineWidth: 1
                             )
                         )
                 )
                 .shadow(
-                    color: border.opacity(self.isHovered ? 0.3 : 0.12),
-                    radius: self.isHovered ? self.theme.metrics.cardShadow.radius - 2 : 2,
+                    color: border.opacity(self.isHovered ? 0.18 : 0.06),
+                    radius: self.isHovered ? 4 : 1.5,
                     x: 0,
-                    y: self.isHovered ? self.theme.metrics.cardShadow.y - 1 : 1
+                    y: self.isHovered ? 1 : 0.5
                 )
                 .scaleEffect(FluidInteractionVisuals.scale(isPressed: self.configuration.isPressed, isHovered: self.isHovered))
                 .animation(FluidInteractionVisuals.hoverAnimation, value: self.isHovered)
@@ -435,19 +513,211 @@ struct GlassToggleStyle: ToggleStyle {
 // MARK: - Native Form Row Style
 
 struct FormRowStyle: ViewModifier {
+    @Environment(\.theme) private var theme
+
     func body(content: Content) -> some View {
+        let row = self.theme.metrics.formRow
+        let shape = RoundedRectangle(cornerRadius: row.cornerRadius, style: .continuous)
+
         content
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(.ultraThinMaterial.opacity(0.5))
-                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(.white.opacity(0.08), lineWidth: 1)))
+            .padding(.horizontal, row.horizontalPadding)
+            .padding(.vertical, row.verticalPadding)
+            .background(
+                shape
+                    .fill(self.theme.materials.formRow.opacity(row.materialOpacity))
+                    .overlay(
+                        shape.stroke(self.theme.palette.cardBorder.opacity(row.borderOpacity), lineWidth: 1)
+                    )
+            )
+    }
+}
+
+// MARK: - Searchable Picker Chrome
+
+struct FluidPickerDisclosureIcon: View {
+    @Environment(\.theme) private var theme
+    var backgroundOpacity: Double
+
+    var body: some View {
+        let picker = self.theme.metrics.pickerControl
+
+        Image(systemName: "chevron.down")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .frame(width: picker.disclosureSize, height: picker.disclosureSize)
+            .background(
+                Circle()
+                    .fill(self.theme.palette.cardBackground.opacity(self.backgroundOpacity))
+                    .overlay(
+                        Circle()
+                            .stroke(self.theme.palette.cardBorder.opacity(picker.disclosureBorderOpacity), lineWidth: 1)
+                    )
+            )
+    }
+}
+
+struct SearchablePickerControlChrome: ViewModifier {
+    @Environment(\.theme) private var theme
+    let width: CGFloat?
+    let height: CGFloat?
+    let usesMaterial: Bool
+    let showsShadow: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let picker = self.theme.metrics.pickerControl
+        let shape = RoundedRectangle(cornerRadius: picker.cornerRadius, style: .continuous)
+        let control = content
+            .frame(width: self.width, alignment: .leading)
+            .frame(maxWidth: self.width == nil ? .infinity : nil, alignment: .leading)
+            .padding(.horizontal, picker.horizontalPadding)
+            .padding(.vertical, picker.verticalPadding)
+            .frame(height: self.height)
+            .contentShape(Rectangle())
+
+        if self.usesMaterial {
+            control
+                .background(self.theme.materials.card, in: shape)
+                .background(self.pickerSurface(shape, picker: picker))
+                .shadow(
+                    color: self.theme.palette.cardBorder.opacity(self.showsShadow ? 0.18 : 0),
+                    radius: self.showsShadow ? 3 : 0,
+                    x: 0,
+                    y: self.showsShadow ? 1 : 0
+                )
+        } else {
+            control
+                .background(self.pickerSurface(shape, picker: picker))
+        }
+    }
+
+    private func pickerSurface(
+        _ shape: RoundedRectangle,
+        picker: AppTheme.Metrics.PickerControl
+    ) -> some View {
+        shape
+            .fill(self.theme.palette.cardBackground)
+            .overlay(
+                shape.stroke(self.theme.palette.cardBorder.opacity(picker.borderOpacity), lineWidth: 1)
+            )
+    }
+}
+
+struct SearchablePickerSearchFieldChrome: ViewModifier {
+    @Environment(\.theme) private var theme
+
+    func body(content: Content) -> some View {
+        let picker = self.theme.metrics.pickerControl
+        let shape = RoundedRectangle(cornerRadius: picker.cornerRadius, style: .continuous)
+
+        content
+            .padding(self.theme.metrics.spacing.sm)
+            .background(
+                shape
+                    .fill(self.theme.palette.contentBackground)
+                    .overlay(
+                        shape.stroke(self.theme.palette.cardBorder.opacity(picker.searchBorderOpacity), lineWidth: 1)
+                    )
+            )
     }
 }
 
 extension View {
     func formRowStyle() -> some View {
         modifier(FormRowStyle())
+    }
+
+    func searchablePickerControlChrome(
+        width: CGFloat? = nil,
+        height: CGFloat? = nil,
+        usesMaterial: Bool = false,
+        showsShadow: Bool = false
+    ) -> some View {
+        modifier(SearchablePickerControlChrome(
+            width: width,
+            height: height,
+            usesMaterial: usesMaterial,
+            showsShadow: showsShadow
+        ))
+    }
+
+    func searchablePickerSearchFieldChrome() -> some View {
+        modifier(SearchablePickerSearchFieldChrome())
+    }
+
+    func searchablePickerSelectedRowBackground(isSelected: Bool) -> some View {
+        modifier(SearchablePickerSelectedRowBackground(isSelected: isSelected))
+    }
+}
+
+private struct SearchablePickerSelectedRowBackground: ViewModifier {
+    @Environment(\.theme) private var theme
+    let isSelected: Bool
+
+    func body(content: Content) -> some View {
+        content.background(
+            self.isSelected
+                ? self.theme.palette.accent.opacity(self.theme.metrics.pickerControl.selectedRowOpacity)
+                : Color.clear
+        )
+    }
+}
+
+// MARK: - Square Icon Button Style (no horizontal padding, fixed square)
+
+struct SquareIconButtonStyle: ButtonStyle {
+    var foreground: Color? = nil
+    var borderColor: Color? = nil
+
+    func makeBody(configuration: Configuration) -> some View {
+        SquareIconButton(
+            configuration: configuration,
+            foreground: self.foreground,
+            borderColor: self.borderColor
+        )
+    }
+
+    private struct SquareIconButton: View {
+        @Environment(\.theme) private var theme
+        @State private var isHovered = false
+        let configuration: ButtonStyle.Configuration
+        let foreground: Color?
+        let borderColor: Color?
+
+        private var shape: RoundedRectangle {
+            RoundedRectangle(cornerRadius: self.theme.metrics.corners.sm, style: .continuous)
+        }
+
+        var body: some View {
+            let border = self.borderColor ?? self.theme.palette.cardBorder
+            let borderOpacity = self.borderColor == nil
+                ? (self.isHovered ? 0.8 : 0.6)
+                : (self.isHovered ? 0.84 : 0.68)
+            let foregroundColor = self.foreground ?? self.theme.palette.primaryText
+
+            self.configuration.label
+                .foregroundStyle(foregroundColor)
+                .background(self.theme.materials.card, in: self.shape)
+                .background(
+                    self.shape
+                        .fill(self.theme.palette.cardBackground)
+                        .overlay(
+                            self.shape.stroke(
+                                border.opacity(borderOpacity),
+                                lineWidth: 1
+                            )
+                        )
+                )
+                .shadow(
+                    color: border.opacity(self.isHovered ? 0.18 : 0.06),
+                    radius: self.isHovered ? 4 : 1.5,
+                    x: 0,
+                    y: self.isHovered ? 1 : 0.5
+                )
+                .scaleEffect(FluidInteractionVisuals.scale(isPressed: self.configuration.isPressed, isHovered: self.isHovered))
+                .animation(FluidInteractionVisuals.hoverAnimation, value: self.isHovered)
+                .animation(FluidInteractionVisuals.pressedAnimation, value: self.configuration.isPressed)
+                .onHover { self.isHovered = $0 }
+        }
     }
 }

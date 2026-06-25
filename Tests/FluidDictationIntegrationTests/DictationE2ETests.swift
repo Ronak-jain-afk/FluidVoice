@@ -11,16 +11,25 @@ final class DictationE2ETests: XCTestCase {
     private let appPromptBindingsKey = "AppPromptBindings"
     private let selectedDictationPromptIDKey = "SelectedDictationPromptID"
     private let selectedEditPromptIDKey = "SelectedEditPromptID"
+    private let dictationPromptOffKey = "DictationPromptOff"
+    private let editPromptOffKey = "EditPromptOff"
     private let defaultDictationPromptOverrideKey = "DefaultDictationPromptOverride"
     private let defaultEditPromptOverrideKey = "DefaultEditPromptOverride"
     private let savedProvidersKey = "SavedProviders"
     private let selectedProviderIDKey = "SelectedProviderID"
     private let availableModelsByProviderKey = "AvailableModelsByProvider"
     private let selectedModelByProviderKey = "SelectedModelByProvider"
+    private let commandModeLinkedToGlobalKey = "CommandModeLinkedToGlobal"
+    private let commandModeSelectedProviderIDKey = "CommandModeSelectedProviderID"
+    private let commandModeSelectedModelKey = "CommandModeSelectedModel"
+    private var privateAISelectedModelIDKey: String { PrivateAIProviderFeature.shared.selectedModelDefaultsKey }
+    private var privateAILocalModelPathKey: String { PrivateAIProviderFeature.shared.localModelPathDefaultsKey }
+    private var privateAIPrefixKVCacheEnabledKey: String { PrivateAIProviderFeature.shared.prefixCacheDefaultsKey }
+    private let verifiedProviderFingerprintsKey = "VerifiedProviderFingerprints"
 
     func testTranscriptionStartSound_noneOptionHasNoFile() {
         XCTAssertEqual(SettingsStore.TranscriptionStartSound.none.displayName, "None")
-        XCTAssertNil(SettingsStore.TranscriptionStartSound.none.soundFileName)
+        XCTAssertNil(SettingsStore.TranscriptionStartSound.none.startSoundFileName)
     }
 
     func testTranscriptionStartSound_legacyDisabledToggleMigratesToNone() {
@@ -150,6 +159,48 @@ final class DictationE2ETests: XCTestCase {
         }
     }
 
+    func testEditPromptOffUsesBuiltInDefaultAndPausesOverrides() {
+        self.withPromptSettingsRestored {
+            let settings = SettingsStore.shared
+
+            let global = SettingsStore.DictationPromptProfile(
+                name: "Global Edit",
+                prompt: "Global edit prompt",
+                mode: .edit
+            )
+            let mail = SettingsStore.DictationPromptProfile(
+                name: "Mail Edit",
+                prompt: "Mail edit prompt",
+                mode: .edit
+            )
+
+            settings.dictationPromptProfiles = [global, mail]
+            settings.selectedEditPromptID = global.id
+            settings.defaultEditPromptOverride = "Custom default edit prompt"
+            settings.appPromptBindings = [
+                SettingsStore.AppPromptBinding(
+                    mode: .edit,
+                    appBundleID: "com.apple.mail",
+                    appName: "Mail",
+                    promptID: mail.id
+                ),
+            ]
+
+            settings.setPromptOff(true, for: .edit)
+
+            let paused = settings.promptResolution(for: .edit, appBundleID: "com.apple.mail")
+            XCTAssertEqual(paused.source, .builtInDefault)
+            XCTAssertNil(paused.profile)
+            XCTAssertNil(paused.appBinding)
+            XCTAssertEqual(paused.systemPrompt, SettingsStore.defaultSystemPromptText(for: .edit))
+
+            settings.setSelectedPromptID(global.id, for: .edit)
+
+            XCTAssertFalse(settings.isPromptOff(for: .edit))
+            XCTAssertEqual(settings.promptResolution(for: .edit, appBundleID: nil).profile?.id, global.id)
+        }
+    }
+
     func testAppPromptBindings_reconcileInvalidPromptAndLegacyMode() {
         self.withPromptSettingsRestored {
             let settings = SettingsStore.shared
@@ -182,6 +233,40 @@ final class DictationE2ETests: XCTestCase {
         }
     }
 
+    func testLegacyBlockedPromptPlaceholderIsRemoved() {
+        self.withPromptSettingsRestored {
+            let settings = SettingsStore.shared
+
+            let blocked = SettingsStore.DictationPromptProfile(
+                name: "Blocked",
+                prompt: "Blocked prompt",
+                mode: .dictate
+            )
+            let real = SettingsStore.DictationPromptProfile(
+                name: "Keep Me",
+                prompt: "Real user prompt",
+                mode: .dictate
+            )
+
+            settings.dictationPromptProfiles = [blocked, real]
+            settings.selectedDictationPromptID = blocked.id
+            settings.appPromptBindings = [
+                SettingsStore.AppPromptBinding(
+                    mode: .dictate,
+                    appBundleID: "com.apple.notes",
+                    appName: "Notes",
+                    promptID: blocked.id
+                ),
+            ]
+
+            settings.reconcilePromptStateAfterProfileChanges()
+
+            XCTAssertEqual(settings.dictationPromptProfiles.map(\.id), [real.id])
+            XCTAssertNil(settings.selectedDictationPromptID)
+            XCTAssertEqual(settings.appPromptBindings.first?.promptID, nil)
+        }
+    }
+
     func testCustomProviderSettingsRoundTripThroughSettingsStore() {
         self.withProviderSettingsRestored {
             let settings = SettingsStore.shared
@@ -202,6 +287,179 @@ final class DictationE2ETests: XCTestCase {
             XCTAssertEqual(settings.savedProviders, [provider])
             XCTAssertEqual(settings.availableModelsByProvider[providerKey], provider.models)
             XCTAssertEqual(settings.selectedModelByProvider[providerKey], provider.models[0])
+        }
+    }
+
+    func testUnavailableSelectedProviderClearsSelection() {
+        self.withProviderSettingsRestored {
+            let settings = SettingsStore.shared
+
+            settings.savedProviders = []
+            settings.selectedProviderID = "removed-provider"
+
+            XCTAssertEqual(settings.selectedProviderID, "")
+        }
+    }
+
+    func testPrivateAIProviderDictationPromptSelection_allowsOffAndRestoresNonFluidPrompt() {
+        self.withPromptAndProviderSettingsRestored {
+            let settings = SettingsStore.shared
+            let custom = SettingsStore.DictationPromptProfile(
+                name: "Custom Dictate",
+                prompt: "Use the custom prompt",
+                mode: .dictate
+            )
+            settings.dictationPromptProfiles = [custom]
+            settings.selectedModelByProvider = [
+                "openai": "gpt-4.1",
+                PrivateAIProviderFeature.shared.providerID: PrivateAIProviderFeature.shared.providerID,
+            ]
+            settings.selectedProviderID = "openai"
+            settings.setDictationPromptSelection(.profile(custom.id))
+
+            XCTAssertEqual(settings.dictationPromptSelection(for: .primary), .profile(custom.id))
+
+            settings.selectedProviderID = PrivateAIProviderFeature.shared.providerID
+            if PrivateFeatures.privateAIProvider {
+                XCTAssertEqual(settings.dictationPromptSelection(for: .primary), .privateAI)
+            } else {
+                XCTAssertEqual(settings.dictationPromptSelection(for: .primary), .profile(custom.id))
+            }
+
+            settings.setDictationPromptSelection(.off)
+            XCTAssertEqual(settings.dictationPromptSelection(for: .primary), .off)
+
+            settings.selectedProviderID = "openai"
+            XCTAssertEqual(settings.dictationPromptSelection(for: .primary), .off)
+
+            settings.setDictationPromptSelection(.profile(custom.id))
+            XCTAssertEqual(settings.dictationPromptSelection(for: .primary), .profile(custom.id))
+        }
+    }
+
+    func testPrivateAIProviderDictationPromptSelection_usesOnlyFluidPromptOrOffWhileSelected() {
+        self.withPromptAndProviderSettingsRestored {
+            let settings = SettingsStore.shared
+            let custom = SettingsStore.DictationPromptProfile(
+                name: "Custom Dictate",
+                prompt: "Use the custom prompt",
+                mode: .dictate
+            )
+            settings.dictationPromptProfiles = [custom]
+            settings.selectedModelByProvider = [
+                "openai": "gpt-4.1",
+                PrivateAIProviderFeature.shared.providerID: PrivateAIProviderFeature.shared.providerID,
+            ]
+
+            settings.selectedProviderID = PrivateAIProviderFeature.shared.providerID
+            settings.setDictationPromptSelection(.default)
+            XCTAssertEqual(
+                settings.dictationPromptSelection(for: .primary),
+                PrivateFeatures.privateAIProvider ? .privateAI : .default
+            )
+
+            settings.setDictationPromptSelection(.profile(custom.id))
+            XCTAssertEqual(
+                settings.dictationPromptSelection(for: .primary),
+                PrivateFeatures.privateAIProvider ? .privateAI : .profile(custom.id)
+            )
+
+            settings.setDictationPromptSelection(.off)
+            XCTAssertEqual(settings.dictationPromptSelection(for: .primary), .off)
+            XCTAssertEqual(settings.dictationPromptDisplayName(for: .primary, appBundleID: nil), "Off")
+
+            settings.selectedProviderID = "openai"
+            settings.setDictationPromptSelection(.profile(custom.id))
+            XCTAssertEqual(settings.dictationPromptSelection(for: .primary), .profile(custom.id))
+        }
+    }
+
+    func testPrivateAIProviderPrefixKVCache_defaultsOnAndPersistsToggle() {
+        self.withRestoredDefaults(keys: [self.privateAIPrefixKVCacheEnabledKey]) {
+            let settings = SettingsStore.shared
+
+            XCTAssertTrue(settings.privateAIPrefixKVCacheEnabled)
+
+            settings.privateAIPrefixKVCacheEnabled = false
+            XCTAssertFalse(settings.privateAIPrefixKVCacheEnabled)
+
+            settings.privateAIPrefixKVCacheEnabled = true
+            XCTAssertTrue(settings.privateAIPrefixKVCacheEnabled)
+        }
+    }
+
+    func testPrivateAIProviderLocalRuntimeOnlyHandlesPrivateModels() {
+        self.withRestoredDefaults(keys: [self.privateAILocalModelPathKey]) {
+            let tempURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("FluidVoice-PrivateAI-\(UUID().uuidString).gguf")
+            XCTAssertTrue(FileManager.default.createFile(atPath: tempURL.path, contents: Data(), attributes: nil))
+            defer { try? FileManager.default.removeItem(at: tempURL) }
+
+            UserDefaults.standard.set(tempURL.path, forKey: self.privateAILocalModelPathKey)
+
+            XCTAssertEqual(
+                PrivateAIIntegrationService.isLocalRuntimeConfigured,
+                PrivateFeatures.privateAIProvider
+            )
+            XCTAssertFalse(PrivateAIIntegrationService.shouldHandleDictation(model: "gpt-4.1"))
+            XCTAssertEqual(
+                PrivateAIIntegrationService.shouldHandleDictation(model: PrivateAIProviderFeature.shared.providerID),
+                PrivateFeatures.privateAIProvider
+            )
+        }
+    }
+
+    func testPrivateAIProviderLocalRuntimeDoesNotConfigureNonFluidProvider() {
+        self.withRestoredDefaults(
+            keys: [
+                self.privateAILocalModelPathKey,
+                self.selectedProviderIDKey,
+                self.selectedModelByProviderKey,
+                self.verifiedProviderFingerprintsKey,
+                self.selectedDictationPromptIDKey,
+                self.dictationPromptOffKey,
+            ]
+        ) {
+            let settings = SettingsStore.shared
+            let tempURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("FluidVoice-PrivateAI-\(UUID().uuidString).gguf")
+            XCTAssertTrue(FileManager.default.createFile(atPath: tempURL.path, contents: Data(), attributes: nil))
+            defer { try? FileManager.default.removeItem(at: tempURL) }
+
+            UserDefaults.standard.set(tempURL.path, forKey: self.privateAILocalModelPathKey)
+            settings.selectedProviderID = "openai"
+            settings.selectedModelByProvider = ["openai": "gpt-4.1"]
+            settings.verifiedProviderFingerprints = [:]
+            settings.setDictationPromptSelection(.default)
+
+            XCTAssertEqual(
+                PrivateAIIntegrationService.isLocalRuntimeConfigured,
+                PrivateFeatures.privateAIProvider
+            )
+            XCTAssertFalse(DictationAIPostProcessingGate.isConfigured(for: .primary, appBundleID: nil))
+        }
+    }
+
+    func testPrivateAIProviderDoesNotConfigureCommandMode() {
+        guard PrivateFeatures.privateAIProvider else { return }
+
+        self.withRestoredDefaults(
+            keys: [
+                self.selectedProviderIDKey,
+                self.commandModeLinkedToGlobalKey,
+                self.commandModeSelectedProviderIDKey,
+                self.commandModeSelectedModelKey,
+            ]
+        ) {
+            let settings = SettingsStore.shared
+            settings.selectedProviderID = PrivateAIProviderFeature.shared.providerID
+            settings.commandModeLinkedToGlobal = true
+            settings.commandModeSelectedProviderID = PrivateAIProviderFeature.shared.providerID
+            settings.commandModeSelectedModel = PrivateAIProviderFeature.shared.providerID
+
+            XCTAssertEqual(settings.effectiveCommandModeProviderID, "")
+            XCTAssertTrue(settings.commandModeReadinessIssue?.contains("coming soon") == true)
+            XCTAssertFalse(settings.isCommandModeProviderVerified(PrivateAIProviderFeature.shared.providerID))
         }
     }
 
@@ -314,6 +572,8 @@ final class DictationE2ETests: XCTestCase {
                 self.appPromptBindingsKey,
                 self.selectedDictationPromptIDKey,
                 self.selectedEditPromptIDKey,
+                self.dictationPromptOffKey,
+                self.editPromptOffKey,
                 self.defaultDictationPromptOverrideKey,
                 self.defaultEditPromptOverrideKey,
             ],
@@ -328,6 +588,27 @@ final class DictationE2ETests: XCTestCase {
                 self.selectedProviderIDKey,
                 self.availableModelsByProviderKey,
                 self.selectedModelByProviderKey,
+            ],
+            run: run
+        )
+    }
+
+    private func withPromptAndProviderSettingsRestored(run: () -> Void) {
+        self.withRestoredDefaults(
+            keys: [
+                self.dictationPromptProfilesKey,
+                self.appPromptBindingsKey,
+                self.selectedDictationPromptIDKey,
+                self.selectedEditPromptIDKey,
+                self.dictationPromptOffKey,
+                self.editPromptOffKey,
+                self.defaultDictationPromptOverrideKey,
+                self.defaultEditPromptOverrideKey,
+                self.savedProvidersKey,
+                self.selectedProviderIDKey,
+                self.availableModelsByProviderKey,
+                self.selectedModelByProviderKey,
+                self.privateAISelectedModelIDKey,
             ],
             run: run
         )

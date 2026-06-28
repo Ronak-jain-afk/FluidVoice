@@ -1,5 +1,7 @@
 # FluidVoice
 
+[![GitHub stars](https://img.shields.io/github/stars/altic-dev/FluidVoice?style=social)](https://github.com/altic-dev/FluidVoice/stargazers)
+[![Sponsor FluidVoice](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/altic-dev)
 [![Supported Models](https://img.shields.io/badge/Models-Nemotron%20Speech%203.5%20%7C%20Parakeet%20Flash%20%7C%20Parakeet%20v3%20%26%20v2%20%7C%20Cohere%20%7C%20Apple%20Speech%20%7C%20Whisper-blue)](https://huggingface.co/nvidia/parakeet_realtime_eou_120m-v1)
 
 Open source voice-to-text dictation app for macOS with on-device AI enhancement.
@@ -15,7 +17,7 @@ Open source voice-to-text dictation app for macOS with on-device AI enhancement.
 
 ## Support FluidVoice
 
-If FluidVoice makes your day a little easier, you can support its continued development on [GitHub Sponsors](https://github.com/sponsors/altic-dev).
+If FluidVoice helps you, you can support continued development and future platform work for iOS and Windows on [GitHub Sponsors](https://github.com/sponsors/altic-dev).
 
 ---
 

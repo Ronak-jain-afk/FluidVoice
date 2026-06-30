@@ -659,7 +659,10 @@ final class GlobalHotkeyManager: NSObject {
                let pasteShortcut = SettingsStore.shared.pasteLastTranscriptionHotkeyShortcut,
                pasteShortcut.matches(keyCode: keyCode, modifiers: eventModifiers)
             {
-                self.triggerPasteLastTranscription()
+                // Holding the chord emits auto-repeat key-downs; because the paste waits for the
+                // modifiers to release, every repeat would otherwise queue another insertion and
+                // paste N times. triggerPasteLastTranscription ignores repeats.
+                self.triggerPasteLastTranscription(isAutorepeat: event.getIntegerValueField(.keyboardEventAutorepeat) != 0)
                 return nil
             }
 
@@ -1666,9 +1669,11 @@ final class GlobalHotkeyManager: NSObject {
         }
     }
 
-    private func triggerPasteLastTranscription() {
+    private func triggerPasteLastTranscription(isAutorepeat: Bool) {
         Task { @MainActor [weak self] in
             guard let self = self else { return }
+            // Holding the chord auto-repeats the key-down; act only on the initial press.
+            guard !isAutorepeat else { return }
             guard self.canTriggerRecordingAction("Paste last transcription hotkey") else { return }
             // Re-pasting mid-recording would be surprising; ignore while capture is active.
             guard !self.asrService.isRunning else {

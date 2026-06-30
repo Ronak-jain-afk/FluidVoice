@@ -2532,8 +2532,19 @@ struct ContentView: View {
             // physically held. Synthesizing text in that state makes the target app treat the
             // characters as keyboard shortcuts and drop them, so wait for the modifiers to be
             // released before inserting. (Dictation never hits this because by the time it types,
-            // no keys are held.)
-            await Self.waitForHotkeyModifiersReleased(timeout: 0.6)
+            // no keys are held.) If they never release (stuck/held), abort rather than typing a
+            // corrupted — and possibly destructive — shortcut sequence; the user can retrigger.
+            guard await Self.waitForHotkeyModifiersReleased(timeout: 0.6) else {
+                DebugLogger.shared.info("Actions: Paste aborted - modifier keys still held", source: "ContentView")
+                return
+            }
+
+            // Re-check here rather than only at the hotkey trigger: the overlay menu entry point
+            // has no pre-check, and the wait above may have elapsed since the trigger fired.
+            guard !self.asr.isRunning else {
+                DebugLogger.shared.info("Actions: Paste skipped - recording in progress", source: "ContentView")
+                return
+            }
 
             let typingTarget = self.resolveTypingTargetPID()
             guard typingTarget.pid != nil else {
@@ -2548,18 +2559,20 @@ struct ContentView: View {
         }
     }
 
-    /// Polls until the keyboard modifier keys are released (or the timeout elapses). Used before
-    /// synthesizing a paste so the inserted characters aren't swallowed as modifier+key shortcuts.
-    private static func waitForHotkeyModifiersReleased(timeout: TimeInterval) async {
+    /// Polls until the keyboard modifier keys are released, returning `true` once they are, or
+    /// `false` if the timeout elapses with keys still held. Used before synthesizing a paste so the
+    /// inserted characters aren't swallowed as modifier+key shortcuts.
+    private static func waitForHotkeyModifiersReleased(timeout: TimeInterval) async -> Bool {
         let relevant: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn]
         let start = Date()
         while Date().timeIntervalSince(start) < timeout {
             let flags = CGEventSource.flagsState(.combinedSessionState)
             if flags.isDisjoint(with: relevant) {
-                return
+                return true
             }
             try? await Task.sleep(nanoseconds: 15_000_000) // 15ms
         }
+        return false
     }
 
     private func undoLastAIProcessingFromHistory() {

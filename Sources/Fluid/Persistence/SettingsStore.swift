@@ -2855,7 +2855,11 @@ final class SettingsStore: ObservableObject {
         self.rewriteModeSelectedProviderID = payload.rewriteModeSelectedProviderID
         self.rewriteModeLinkedToGlobal = payload.rewriteModeLinkedToGlobal
         self.cancelRecordingHotkeyShortcut = payload.cancelRecordingHotkeyShortcut
-        self.pasteLastTranscriptionHotkeyShortcut = payload.pasteLastTranscriptionHotkeyShortcut
+        // Both guarded so restoring an older backup (which predates these fields) doesn't wipe a
+        // currently-configured shortcut or leave the feature enabled with no shortcut bound.
+        if let pasteLastTranscriptionHotkeyShortcut = payload.pasteLastTranscriptionHotkeyShortcut {
+            self.pasteLastTranscriptionHotkeyShortcut = pasteLastTranscriptionHotkeyShortcut
+        }
         if let pasteLastTranscriptionShortcutEnabled = payload.pasteLastTranscriptionShortcutEnabled {
             self.pasteLastTranscriptionShortcutEnabled = pasteLastTranscriptionShortcutEnabled
         }

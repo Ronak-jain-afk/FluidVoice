@@ -143,6 +143,18 @@ final class HotkeyShortcutTests: XCTestCase {
         }
     }
 
+    func testPasteLastTranscriptionShortcutSupportsMouseButton() throws {
+        try self.withRestoredDefaults(keys: [self.pasteLastTranscriptionShortcutKey]) {
+            let mouseShortcut = HotkeyShortcut(mouseButton: 3, modifierFlags: [.option])
+            SettingsStore.shared.pasteLastTranscriptionHotkeyShortcut = mouseShortcut
+
+            let stored = SettingsStore.shared.pasteLastTranscriptionHotkeyShortcut
+            XCTAssertEqual(stored, mouseShortcut)
+            XCTAssertTrue(stored?.isMouseShortcut ?? false)
+            XCTAssertTrue(stored?.matchesMouse(button: 3, modifiers: [.option]) ?? false)
+        }
+    }
+
     private func withRestoredDefaults(keys: [String], run: () throws -> Void) rethrows {
         let defaults = UserDefaults.standard
         var snapshot: [String: Any] = [:]

@@ -117,7 +117,12 @@ enum ShortcutRecordingTarget: Hashable {
     }
 
     var allowsMouseShortcut: Bool {
-        self.isPrimaryDictation
+        switch self {
+        case .primaryDictation, .pasteLast:
+            return true
+        case .secondaryDictation, .command, .edit, .cancel, .dictationPrompt, .newPrompt:
+            return false
+        }
     }
 
     var isPrimaryDictation: Bool {
@@ -993,7 +998,7 @@ struct ContentView: View {
     private func shortcutConflictMessage(for shortcut: HotkeyShortcut, target: ShortcutRecordingTarget) -> String? {
         if shortcut.isMouseShortcut {
             guard target.allowsMouseShortcut else {
-                return "Mouse clicks can only be assigned to Primary Dictation Shortcut"
+                return "Mouse clicks can only be assigned to Primary Dictation or Paste Last Transcription"
             }
 
             if shortcut.isUnmodifiedLeftOrRightClick, let mouseButton = shortcut.mouseButton {

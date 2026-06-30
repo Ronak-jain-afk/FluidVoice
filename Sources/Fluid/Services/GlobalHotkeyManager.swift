@@ -902,18 +902,14 @@ final class GlobalHotkeyManager: NSObject {
 
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
             self.markOtherInputDuringModifierOnly()
-            let mouseButton = self.mouseButton(from: event)
-            if self.primaryShortcuts.contains(where: { $0.matchesMouse(button: mouseButton, modifiers: eventModifiers) }) {
-                guard self.beginPrimaryShortcutPress(.mouse(mouseButton)) else { return nil }
-                self.handlePrimaryDictationTriggerDown()
+            if self.handleMouseShortcutDown(event, modifiers: eventModifiers) {
                 return nil
             }
 
         case .leftMouseUp, .rightMouseUp, .otherMouseUp:
-            let mouseButton = self.mouseButton(from: event)
-            guard self.finishPrimaryShortcutPress(.mouse(mouseButton)) else { break }
-            self.handlePrimaryDictationTriggerUp()
-            return nil
+            if self.handleMouseShortcutUp(event) {
+                return nil
+            }
 
         case .flagsChanged:
             if HotkeyShortcut.modifierFlag(forKeyCode: keyCode) != nil {
@@ -1667,6 +1663,47 @@ final class GlobalHotkeyManager: NSObject {
             )
             await self.rewriteModeCallback?()
         }
+    }
+
+    /// Handles a mouse-button down event against the configured mouse shortcuts. Returns true when
+    /// the event was consumed. "Paste Last Transcription" is a one-shot trigger (mirrors the keyboard
+    /// path); primary dictation begins a press here and ends it on mouse-up.
+    private func handleMouseShortcutDown(_ event: CGEvent, modifiers eventModifiers: NSEvent.ModifierFlags) -> Bool {
+        let mouseButton = self.mouseButton(from: event)
+
+        if SettingsStore.shared.pasteLastTranscriptionShortcutEnabled,
+           let pasteShortcut = SettingsStore.shared.pasteLastTranscriptionHotkeyShortcut,
+           pasteShortcut.matchesMouse(button: mouseButton, modifiers: eventModifiers)
+        {
+            self.triggerPasteLastTranscription(isAutorepeat: false)
+            return true
+        }
+
+        if self.primaryShortcuts.contains(where: { $0.matchesMouse(button: mouseButton, modifiers: eventModifiers) }) {
+            guard self.beginPrimaryShortcutPress(.mouse(mouseButton)) else { return true }
+            self.handlePrimaryDictationTriggerDown()
+            return true
+        }
+
+        return false
+    }
+
+    /// Handles a mouse-button up event. Swallows the up that pairs with a consumed paste mouse-down
+    /// so the focused app never sees an orphaned mouse-up; otherwise ends a primary dictation press.
+    private func handleMouseShortcutUp(_ event: CGEvent) -> Bool {
+        let mouseButton = self.mouseButton(from: event)
+
+        if SettingsStore.shared.pasteLastTranscriptionShortcutEnabled,
+           let pasteShortcut = SettingsStore.shared.pasteLastTranscriptionHotkeyShortcut,
+           pasteShortcut.isMouseShortcut,
+           pasteShortcut.mouseButton == mouseButton
+        {
+            return true
+        }
+
+        guard self.finishPrimaryShortcutPress(.mouse(mouseButton)) else { return false }
+        self.handlePrimaryDictationTriggerUp()
+        return true
     }
 
     private func triggerPasteLastTranscription(isAutorepeat: Bool) {

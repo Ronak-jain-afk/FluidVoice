@@ -17,6 +17,7 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
 
     // Cached menu items to avoid rebuilding entire menu
     private var statusMenuItem: NSMenuItem?
+    private var copyLastTranscriptMenuItem: NSMenuItem?
     private var rollbackMenuItem: NSMenuItem?
     private var microphoneMenuItem: NSMenuItem?
     private var microphoneSubmenu: NSMenu?
@@ -302,6 +303,7 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
 
         // Track processing state to prevent hide during AI refinement
         self.isProcessingActive = processing
+        self.updateMenuItemsText()
 
         if processing {
             self.pendingProcessingShowOperation?.cancel()
@@ -426,6 +428,7 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
 
         // Create menu
         self.menu = NSMenu()
+        self.menu?.autoenablesItems = false
         self.menu?.delegate = self
         statusItem.menu = self.menu
 
@@ -453,6 +456,15 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         if let statusItem = statusMenuItem {
             menu.addItem(statusItem)
         }
+
+        let copyLastTranscriptItem = NSMenuItem(
+            title: "Copy Last Transcript",
+            action: #selector(copyLastTranscript(_:)),
+            keyEquivalent: ""
+        )
+        copyLastTranscriptItem.target = self
+        menu.addItem(copyLastTranscriptItem)
+        self.copyLastTranscriptMenuItem = copyLastTranscriptItem
 
         menu.addItem(.separator())
 
@@ -534,6 +546,7 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
         let hotkeyInfo = hotkeyDisplay.isEmpty ? "" : " (\(hotkeyDisplay))"
         let statusTitle = self.isRecording ? "Recording...\(hotkeyInfo)" : "Ready to Record\(hotkeyInfo)"
         self.statusMenuItem?.title = statusTitle
+        self.copyLastTranscriptMenuItem?.isEnabled = self.canCopyLastTranscript
         self.microphoneMenuItem?.isEnabled = true
 
         // Update rollback availability text
@@ -604,6 +617,22 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
 
     private func currentPreferredInputUID(defaultInputUID: String?) -> String? {
         return defaultInputUID
+    }
+
+    private var canCopyLastTranscript: Bool {
+        !self.isProcessingActive && TranscriptionHistoryStore.shared.latestClipboardText != nil
+    }
+
+    @objc private func copyLastTranscript(_ sender: Any?) {
+        guard self.canCopyLastTranscript,
+              let text = TranscriptionHistoryStore.shared.latestClipboardText
+        else {
+            DebugLogger.shared.info("Menu action: Copy last transcript requested but history is empty", source: "MenuBarManager")
+            return
+        }
+
+        _ = ClipboardService.copyToClipboard(text)
+        DebugLogger.shared.info("Menu action: Copied latest transcription to clipboard", source: "MenuBarManager")
     }
 
     @objc private func selectMicrophone(_ sender: NSMenuItem) {

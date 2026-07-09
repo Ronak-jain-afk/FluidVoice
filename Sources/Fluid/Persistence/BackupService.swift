@@ -14,6 +14,7 @@ struct SettingsBackupPayload: Codable, Equatable {
     let modelReasoningConfigs: [String: SettingsStore.ModelReasoningConfig]
     let privateAIPrefixKVCacheEnabled: Bool?
     let privateAIBoostEnabled: Bool?
+    let privateAIBackendPreference: SettingsStore.PrivateAIBackendPreference?
     let privateAIContextTokenLimit: Int?
     let selectedSpeechModel: SettingsStore.SpeechModel
     let selectedCohereLanguage: SettingsStore.CohereLanguage

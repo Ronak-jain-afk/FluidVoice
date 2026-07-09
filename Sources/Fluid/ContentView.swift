@@ -2300,6 +2300,14 @@ struct ContentView: View {
                 finalText = normalizedTranscribedText
             }
             let postProcessingLatencyMs = Int((Date().timeIntervalSince(postProcessingStart) * 1000).rounded())
+            let postProcessingProviderName = postProcessingModelInfo.provider ?? "unknown"
+            let postProcessingModelName = postProcessingModelInfo.model ?? "unknown"
+            DebugLogger.shared.info(
+                "Dictation AI post-processing finished in \(postProcessingLatencyMs)ms "
+                    + "provider=\(postProcessingProviderName) model=\(postProcessingModelName) "
+                    + "inputChars=\(postProcessingInputChars) fallback=\(aiFallbackReason != nil)",
+                source: "ContentView"
+            )
             AnalyticsService.shared.capture(
                 .dictationPostProcessingCompleted,
                 properties: [

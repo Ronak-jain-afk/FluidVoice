@@ -70,6 +70,39 @@ final class SettingsStore: ObservableObject {
         return min(requestedOutputTokens, availableOutputTokens)
     }
 
+    enum PrivateAIBackendPreference: String, Codable, CaseIterable, Identifiable {
+        case auto
+        case llama
+        case mlx
+
+        var id: String { self.rawValue }
+
+        /// Default backend when no preference is stored.
+        /// Apple Silicon → MLX (fastest Fluid-1 path). Intel → llama.cpp.
+        static var systemDefault: PrivateAIBackendPreference {
+            CPUArchitecture.isAppleSilicon ? .mlx : .llama
+        }
+
+        var displayName: String {
+            switch self {
+            case .auto: return "Auto"
+            case .llama: return "llama.cpp"
+            case .mlx: return "MLX"
+            }
+        }
+
+        var detail: String {
+            switch self {
+            case .auto:
+                return CPUArchitecture.isAppleSilicon ? "Uses MLX on Apple Silicon; errors if MLX is missing." : "Uses llama.cpp on Intel."
+            case .llama:
+                return "GGUF baseline; works on Intel and Apple Silicon."
+            case .mlx:
+                return "Apple Silicon only; fastest local Fluid-1 path."
+            }
+        }
+    }
+
     // MARK: - Prompt Profiles (Unified)
 
     enum PromptMode: String, Codable, CaseIterable, Identifiable {
@@ -1463,6 +1496,25 @@ final class SettingsStore: ObservableObject {
         }
     }
 
+    var privateAIBackendPreference: PrivateAIBackendPreference {
+        get {
+            let rawValue = self.defaults.string(forKey: Keys.privateAIBackendPreference)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let preference = rawValue.flatMap(PrivateAIBackendPreference.init(rawValue:))
+                ?? PrivateAIBackendPreference.systemDefault
+            if preference == .mlx, CPUArchitecture.isIntel {
+                return .llama
+            }
+            return preference
+        }
+        set {
+            objectWillChange.send()
+            let preference = newValue == .mlx && CPUArchitecture.isIntel ? .llama : newValue
+            self.defaults.set(preference.rawValue, forKey: Keys.privateAIBackendPreference)
+        }
+    }
+
     var privateAIContextTokenLimit: Int {
         get {
             let value = self.defaults.integer(forKey: Keys.privateAIContextTokenLimit)
@@ -2833,6 +2885,7 @@ final class SettingsStore: ObservableObject {
             modelReasoningConfigs: self.modelReasoningConfigs,
             privateAIPrefixKVCacheEnabled: self.privateAIPrefixKVCacheEnabled,
             privateAIBoostEnabled: self.privateAIBoostEnabled,
+            privateAIBackendPreference: self.privateAIBackendPreference,
             privateAIContextTokenLimit: self.privateAIContextTokenLimit,
             selectedSpeechModel: self.selectedSpeechModel,
             selectedCohereLanguage: self.selectedCohereLanguage,
@@ -2931,6 +2984,9 @@ final class SettingsStore: ObservableObject {
         }
         if let privateAIBoostEnabled = payload.privateAIBoostEnabled {
             self.privateAIBoostEnabled = privateAIBoostEnabled
+        }
+        if let privateAIBackendPreference = payload.privateAIBackendPreference {
+            self.privateAIBackendPreference = privateAIBackendPreference
         }
         if let privateAIContextTokenLimit = payload.privateAIContextTokenLimit {
             self.privateAIContextTokenLimit = privateAIContextTokenLimit
@@ -4659,6 +4715,7 @@ private extension SettingsStore {
         static let selectedProviderID = "SelectedProviderID"
         static let privateAIPrefixKVCacheEnabled = "PrivateAIProviderPrefixKVCacheEnabled"
         static let privateAIBoostEnabled = "PrivateAIProviderBoostEnabled"
+        static let privateAIBackendPreference = "FluidIntelligenceBackendPreference"
         static let privateAIContextTokenLimit = "PrivateAIProviderContextTokenLimit"
         static let privateAIContextDefaultMigratedTo4K = "PrivateAIProviderContextDefaultMigratedTo4K"
         static let providerAPIKeys = "ProviderAPIKeys"

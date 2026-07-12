@@ -78,7 +78,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ~/Library/Caches/WhisperModels
-        key: ${{ runner.os }}-whisper-models-v1
+        key: ${{ runner.os }}-whisper-models-transcribecpp-v1
 
     - name: Setup Xcode
       uses: maxim-lobanov/setup-xcode@v1

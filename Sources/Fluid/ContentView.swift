@@ -365,8 +365,6 @@ struct ContentView: View {
                     }
                 }
             }
-            .toolbarBackground(self.theme.palette.toolbarBackground, for: .windowToolbar)
-            .toolbarBackground(.visible, for: .windowToolbar)
             .toolbar(removing: .sidebarToggle)
             .overlay(alignment: .center) {}
             .alert(
